@@ -1,0 +1,7 @@
+node_modules/
+android/
+.next/
+dist/
+*.apk
+.env
+.DS_Store
