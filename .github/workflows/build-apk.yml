@@ -1,0 +1,83 @@
+name: Build Android APK
+
+on:
+  repository_dispatch:
+    types: [build-app]
+  workflow_dispatch:
+    inputs:
+      store_url:
+        description: 'Store URL'
+        required: true
+        default: 'https://salla.sa'
+      app_name:
+        description: 'App Name'
+        required: true
+        default: 'Tatbiqi App'
+      primary_color:
+        description: 'Primary Color'
+        required: true
+        default: '#0F766E'
+      logo_url:
+        description: 'Logo URL'
+        required: false
+        default: ''
+      whatsapp_number:
+        description: 'WhatsApp Number'
+        required: false
+        default: ''
+      order_id:
+        description: 'Order ID'
+        required: true
+        default: 'TRG-test'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Customize app
+        run: |
+          node scripts/build-app.js \
+            --url="${{ github.event.inputs.store_url || github.event.client_payload.store_url }}" \
+            --name="${{ github.event.inputs.app_name || github.event.client_payload.app_name }}" \
+            --color="${{ github.event.inputs.primary_color || github.event.client_payload.primary_color }}" \
+            --logo="${{ github.event.inputs.logo_url || github.event.client_payload.logo_url }}" \
+            --whatsapp="${{ github.event.inputs.whatsapp_number || github.event.client_payload.whatsapp_number }}" \
+            --api="https://app.tatbiqii.com"
+
+      - name: Add Android platform
+        run: npx cap add android || true
+
+      - name: Sync Capacitor
+        run: npx cap sync android
+
+      - name: Build APK
+        run: |
+          cd android
+          ./gradlew assembleDebug
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-${{ github.event.inputs.order_id || github.event.client_payload.order_id }}
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+          retention-days: 30
