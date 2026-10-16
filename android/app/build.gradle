@@ -12,18 +12,18 @@ android {
         versionName "1.0.0"
     }
 
-    // ===== STABLE SIGNING (uses committed keystore - same key for ALL builds) =====
     signingConfigs {
         debug {
-            // Use the stable keystore committed to the repo
             def stableKeystore = file("tatbiqi-debug.keystore")
             if (stableKeystore.exists()) {
                 storeFile stableKeystore
                 storePassword 'tatbiqi123'
                 keyAlias 'tatbiqi-debug'
                 keyPassword 'tatbiqi123'
+                enableV1Signing true
+                enableV2Signing true
+                enableV3Signing true
             } else {
-                // Fallback to runner's default debug keystore
                 def fallback = file("${System.getProperty('user.home')}/.android/debug.keystore")
                 if (fallback.exists()) {
                     storeFile fallback
@@ -40,6 +40,9 @@ android {
                 storePassword 'tatbiqi123'
                 keyAlias 'tatbiqi-debug'
                 keyPassword 'tatbiqi123'
+                enableV1Signing true
+                enableV2Signing true
+                enableV3Signing true
             } else {
                 def fallback = file("${System.getProperty('user.home')}/.android/debug.keystore")
                 if (fallback.exists()) {
@@ -56,19 +59,10 @@ android {
         debug {
             signingConfig signingConfigs.debug
             minifyEnabled false
-            // Enable all signature schemes for max compatibility
-            v1SigningEnabled true
-            v2SigningEnabled true
-            v3SigningEnabled true
-            v4SigningEnabled false
         }
         release {
             signingConfig signingConfigs.release
             minifyEnabled false
-            v1SigningEnabled true
-            v2SigningEnabled true
-            v3SigningEnabled true
-            v4SigningEnabled false
         }
     }
 
