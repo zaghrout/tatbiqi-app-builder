@@ -1,0 +1,138 @@
+name: Build Android APK
+
+on:
+  repository_dispatch:
+    types: [build-app]
+  workflow_dispatch:
+    inputs:
+      store_url:
+        description: 'Store URL'
+        required: true
+        default: 'https://example.salla.sa'
+      app_name:
+        description: 'App Name'
+        required: true
+        default: 'متجري'
+      primary_color:
+        description: 'Primary color hex (without #)'
+        required: false
+        default: '0F766E'
+      logo_url:
+        description: 'Logo URL'
+        required: false
+        default: ''
+      whatsapp_number:
+        description: 'WhatsApp number'
+        required: false
+        default: ''
+      order_id:
+        description: 'Order ID'
+        required: false
+        default: 'TEST-001'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: write
+
+    steps:
+      - name: 📥 Checkout
+        uses: actions/checkout@v4
+
+      - name: 🟢 Setup Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: ☕ Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: 🤖 Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: 🛠️ Setup Gradle 8.7
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '8.7'
+
+      - name: 📜 Generate Gradle wrapper
+        working-directory: android
+        run: |
+          if [ ! -f ./gradlew ]; then
+            gradle wrapper --gradle-version 8.7 --distribution-type bin
+          fi
+          chmod +x ./gradlew
+
+      - name: 📝 Read inputs
+        id: inputs
+        run: |
+          if [ "${{ github.event_name }}" = "repository_dispatch" ]; then
+            echo "store_url=${{ github.event.client_payload.store_url }}" >> $GITHUB_OUTPUT
+            echo "app_name=${{ github.event.client_payload.app_name }}" >> $GITHUB_OUTPUT
+            echo "primary_color=${{ github.event.client_payload.primary_color }}" >> $GITHUB_OUTPUT
+            echo "logo_url=${{ github.event.client_payload.logo_url }}" >> $GITHUB_OUTPUT
+            echo "whatsapp_number=${{ github.event.client_payload.whatsapp_number }}" >> $GITHUB_OUTPUT
+            echo "order_id=${{ github.event.client_payload.order_id }}" >> $GITHUB_OUTPUT
+          else
+            echo "store_url=${{ inputs.store_url }}" >> $GITHUB_OUTPUT
+            echo "app_name=${{ inputs.app_name }}" >> $GITHUB_OUTPUT
+            echo "primary_color=${{ inputs.primary_color }}" >> $GITHUB_OUTPUT
+            echo "logo_url=${{ inputs.logo_url }}" >> $GITHUB_OUTPUT
+            echo "whatsapp_number=${{ inputs.whatsapp_number }}" >> $GITHUB_OUTPUT
+            echo "order_id=${{ inputs.order_id }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: 📦 Install deps
+        run: npm ci || npm install
+
+      - name: 🎨 Configure app
+        env:
+          STORE_URL: ${{ steps.inputs.outputs.store_url }}
+          APP_NAME: ${{ steps.inputs.outputs.app_name }}
+          PRIMARY_COLOR: ${{ steps.inputs.outputs.primary_color }}
+          LOGO_URL: ${{ steps.inputs.outputs.logo_url }}
+          WHATSAPP_NUMBER: ${{ steps.inputs.outputs.whatsapp_number }}
+          ORDER_ID: ${{ steps.inputs.outputs.order_id }}
+        run: |
+          chmod +x ./scripts/configure-app.sh
+          ./scripts/configure-app.sh
+
+      - name: 🔄 Capacitor sync
+        run: npx cap sync android || { cat capacitor.config.json; exit 1; }
+
+      - name: 🔑 Generate debug keystore
+        run: |
+          mkdir -p ~/.android
+          keytool -genkeypair -v \
+            -keystore ~/.android/debug.keystore \
+            -alias androiddebugkey \
+            -storepass android -keypass android \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -dname "CN=Android Debug, O=Android, C=US"
+          cp ~/.android/debug.keystore ./android/app/debug.keystore
+
+      - name: 🔨 Build APK
+        working-directory: android
+        run: ./gradlew assembleDebug --no-daemon --stacktrace
+
+      - name: ✅ Verify + copy APK
+        run: |
+          APK=$(find android -name "*.apk" -type f | head -1)
+          [ -z "$APK" ] && { echo "No APK"; exit 1; }
+          mkdir -p output
+          cp "$APK" "output/${{ steps.inputs.outputs.order_id }}-tatbiqi.apk"
+          ls -la output/
+
+      - name: 📤 Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tatbiqi-apk-${{ steps.inputs.outputs.order_id }}
+          path: output/*.apk
+          retention-days: 30
+          if-no-files-found: error
