@@ -14,7 +14,7 @@ on:
         required: true
         default: 'متجري'
       primary_color:
-        description: 'Primary color hex (without #)'
+        description: 'Color hex (without #)'
         required: false
         default: '0F766E'
       logo_url:
@@ -22,7 +22,7 @@ on:
         required: false
         default: ''
       whatsapp_number:
-        description: 'WhatsApp number'
+        description: 'WhatsApp'
         required: false
         default: ''
       order_id:
@@ -53,8 +53,10 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: 🤖 Setup Android SDK
-        uses: android-actions/setup-android@v3
+      - name: 🤖 Configure Android SDK (preinstalled on runner)
+        run: |
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "platforms;android-34" "build-tools;34.0.0" || true
 
       - name: 🛠️ Setup Gradle 8.7
         uses: gradle/actions/setup-gradle@v3
