@@ -50,9 +50,20 @@ jobs:
 
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          packages: 'tools platform-tools platforms;android-34 build-tools;34.0.0'
+        continue-on-error: true
+
+      - name: Install SDK components manually
+        run: |
+          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
+          $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "platforms;android-34" "build-tools;34.0.0" "platform-tools" || true
 
       - name: Install dependencies
         run: npm install
+
+      - name: Install Capacitor CLI
+        run: npm install -g @capacitor/cli
 
       - name: Customize app
         run: |
