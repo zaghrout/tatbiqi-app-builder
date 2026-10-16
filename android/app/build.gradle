@@ -114,13 +114,23 @@ android {
                 'META-INF/LICENSE.txt',
                 'META-INF/NOTICE',
                 'META-INF/NOTICE.txt',
-                // Remove these problematic files
-                'assets/dexopt/baseline.prof',
-                'assets/dexopt/baseline.profm',
-                'DebugProbesKt.bin',
                 'META-INF/*.version',
-                'META-INF/androidx.*.version'
+                'META-INF/androidx.*.version',
+                'DebugProbesKt.bin'
             ]
+            // Pick first when there are duplicates (baseline.prof comes from androidx.profileinstaller)
+            pickFirsts += [
+                'assets/dexopt/baseline.prof',
+                'assets/dexopt/baseline.profm'
+            ]
+        }
+    }
+    
+    // Disable profile installer compilation (creates the problematic baseline.prof)
+    androidComponents {
+        onVariants(selector().all()) { variant ->
+            variant.packaging.resources.excludes.add('assets/dexopt/baseline.prof')
+            variant.packaging.resources.excludes.add('assets/dexopt/baseline.profm')
         }
     }
     
@@ -140,5 +150,6 @@ dependencies {
 }
 
 apply from: "capacitor.settings.gradle"
+
 
 
