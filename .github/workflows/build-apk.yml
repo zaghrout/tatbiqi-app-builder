@@ -78,6 +78,19 @@ jobs:
       - name: Add Android platform
         run: npx cap add android
 
+      - name: Patch build.gradle for compatibility
+        run: |
+          cd android
+          # Lower minSdkVersion to 22 (Android 5.1) for wider compatibility
+          sed -i 's/minSdkVersion [0-9]*/minSdkVersion 22/' app/build.gradle
+          # Set targetSdkVersion to 34
+          sed -i 's/targetSdkVersion [0-9]*/targetSdkVersion 34/' app/build.gradle
+          # Build universal APK (all ABIs)
+          sed -i 's/ndk {/ndk {\n            abiFilters "armeabi-v7a", "arm64-v8a", "x86", "x86_64"/' app/build.gradle || true
+          # Add universal APK config
+          sed -i '/android {/a \    splits { abi { enable false } }' app/build.gradle || true
+          cat app/build.gradle
+
       - name: Sync Capacitor
         run: npx cap sync android
 
