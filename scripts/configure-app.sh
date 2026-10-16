@@ -356,7 +356,8 @@ if [ -f "$MANIFEST_FILE" ]; then
   echo "→ Updating AndroidManifest.xml"
   cat > "$MANIFEST_FILE" <<'XML_EOF'
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
@@ -369,7 +370,10 @@ if [ -f "$MANIFEST_FILE" ]; then
         android:supportsRtl="true"
         android:theme="@style/AppTheme"
         android:usesCleartextTraffic="true"
-        android:networkSecurityConfig="@xml/network_security_config">
+        android:extractNativeLibs="true"
+        android:networkSecurityConfig="@xml/network_security_config"
+        tools:replace="android:appComponentFactory"
+        android:appComponentFactory="androidx.core.app.CoreComponentFactory">
 
         <activity
             android:name=".MainActivity"
@@ -407,3 +411,4 @@ echo "=== ✅ Configuration complete ==="
 echo "Order ID: $ORDER_ID"
 echo "Store URL: $STORE_URL"
 echo "App Name: $APP_NAME"
+
