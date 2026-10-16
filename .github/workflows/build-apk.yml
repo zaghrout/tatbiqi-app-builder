@@ -121,8 +121,7 @@ jobs:
 
       - name: 🔨 Build APK
         working-directory: android
-        run: ./gradlew assembleDebug --no-daemon --stacktrace
-
+        run: ./gradlew assembleRelease --no-daemon --stacktrace
       - name: ✅ Verify + copy APK
         run: |
           APK=$(find android -name "*.apk" -type f | head -1)
