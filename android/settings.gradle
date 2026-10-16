@@ -1,0 +1,9 @@
+include ':app'
+include ':capacitor-android'
+project(':capacitor-android').projectDir = new File('../node_modules/@capacitor/android/capacitor')
+
+// Apply capacitor.settings.gradle if it exists (for plugins)
+def capSettings = new File('app/capacitor.settings.gradle')
+if (capSettings.exists()) {
+    apply from: capSettings
+}

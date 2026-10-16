@@ -1,7 +1,9 @@
 node_modules/
-android/
-.next/
-dist/
-*.apk
-.env
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/capacitor-cordova-android-plugins/
+*.keystore
+!debug.keystore
 .DS_Store

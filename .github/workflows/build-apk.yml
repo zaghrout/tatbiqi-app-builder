@@ -6,130 +6,242 @@ on:
   workflow_dispatch:
     inputs:
       store_url:
-        description: 'Store URL'
+        description: 'Store URL (e.g. https://mystore.salla.sa)'
         required: true
-        default: 'https://salla.sa'
+        default: 'https://example.salla.sa'
       app_name:
-        description: 'App Name'
+        description: 'App Name (Arabic or English)'
         required: true
-        default: 'Tatbiqi App'
+        default: 'متجري'
       primary_color:
-        description: 'Primary Color'
-        required: true
-        default: '#0F766E'
+        description: 'Primary color hex (without #)'
+        required: false
+        default: '0F766E'
       logo_url:
-        description: 'Logo URL'
+        description: 'Logo URL (https://...)'
         required: false
         default: ''
       whatsapp_number:
-        description: 'WhatsApp Number'
+        description: 'WhatsApp number with country code'
         required: false
         default: ''
       order_id:
-        description: 'Order ID'
-        required: true
-        default: 'TRG-test'
+        description: 'Order ID for tracking'
+        required: false
+        default: 'TEST-001'
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: write
+
     steps:
-      - name: Checkout code
+      # ============ 1. CHECKOUT ============
+      - name: 📥 Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Node.js
+      # ============ 2. SETUP NODE ============
+      - name: 🟢 Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '20'
+          cache: 'npm'
 
-      - name: Setup Java
+      # ============ 3. SETUP JAVA ============
+      - name: ☕ Setup Java 17
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: Setup Android SDK
+      # ============ 4. SETUP ANDROID SDK ============
+      - name: 🤖 Setup Android SDK
         uses: android-actions/setup-android@v3
         with:
-          packages: 'tools platform-tools platforms;android-34 build-tools;34.0.0'
-        continue-on-error: true
+          packages: |
+            platforms;android-34
+            build-tools;34.0.0
+            platform-tools
 
-      - name: Install SDK components manually
+      # ============ 4b. SETUP GRADLE ============
+      - name: 🛠️ Setup Gradle
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '8.7'
+
+      # ============ 4c. GENERATE GRADLE WRAPPER (if missing) ============
+      - name: 📜 Generate Gradle wrapper
+        working-directory: android
         run: |
-          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
-          $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "platforms;android-34" "build-tools;34.0.0" "platform-tools" || true
+          if [ ! -f ./gradlew ]; then
+            echo "Generating gradle wrapper..."
+            gradle wrapper --gradle-version 8.7 --distribution-type bin
+          fi
+          chmod +x ./gradlew
+          ls -la ./gradlew ./gradle/wrapper/
 
-      - name: Install dependencies
-        run: npm install
-
-      - name: Install Capacitor CLI
-        run: npm install -g @capacitor/cli
-
-      - name: Customize app
+      # ============ 5. READ INPUTS ============
+      - name: 📝 Read build inputs
+        id: inputs
         run: |
-          node scripts/build-app.js \
-            --url="${{ github.event.inputs.store_url || github.event.client_payload.store_url }}" \
-            --name="${{ github.event.inputs.app_name || github.event.client_payload.app_name }}" \
-            --color="${{ github.event.inputs.primary_color || github.event.client_payload.primary_color }}" \
-            --logo="${{ github.event.inputs.logo_url || github.event.client_payload.logo_url }}" \
-            --whatsapp="${{ github.event.inputs.whatsapp_number || github.event.client_payload.whatsapp_number }}" \
-            --api="https://app.tatbiqii.com"
+          if [ "${{ github.event_name }}" = "repository_dispatch" ]; then
+            echo "store_url=${{ github.event.client_payload.store_url }}" >> $GITHUB_OUTPUT
+            echo "app_name=${{ github.event.client_payload.app_name }}" >> $GITHUB_OUTPUT
+            echo "primary_color=${{ github.event.client_payload.primary_color }}" >> $GITHUB_OUTPUT
+            echo "logo_url=${{ github.event.client_payload.logo_url }}" >> $GITHUB_OUTPUT
+            echo "whatsapp_number=${{ github.event.client_payload.whatsapp_number }}" >> $GITHUB_OUTPUT
+            echo "order_id=${{ github.event.client_payload.order_id }}" >> $GITHUB_OUTPUT
+          else
+            echo "store_url=${{ inputs.store_url }}" >> $GITHUB_OUTPUT
+            echo "app_name=${{ inputs.app_name }}" >> $GITHUB_OUTPUT
+            echo "primary_color=${{ inputs.primary_color }}" >> $GITHUB_OUTPUT
+            echo "logo_url=${{ inputs.logo_url }}" >> $GITHUB_OUTPUT
+            echo "whatsapp_number=${{ inputs.whatsapp_number }}" >> $GITHUB_OUTPUT
+            echo "order_id=${{ inputs.order_id }}" >> $GITHUB_OUTPUT
+          fi
 
-      - name: Add Android platform
-        run: npx cap add android
-
-      - name: Patch build.gradle for compatibility
+      # ============ 6. INSTALL DEPENDENCIES ============
+      - name: 📦 Install dependencies
         run: |
-          cd android
-          # Lower minSdkVersion to 22 (Android 5.1) for wider compatibility
-          sed -i 's/minSdkVersion [0-9]*/minSdkVersion 22/' app/build.gradle
-          # Set targetSdkVersion to 34
-          sed -i 's/targetSdkVersion [0-9]*/targetSdkVersion 34/' app/build.gradle
-          # Build universal APK (all ABIs)
-          sed -i 's/ndk {/ndk {\n            abiFilters "armeabi-v7a", "arm64-v8a", "x86", "x86_64"/' app/build.gradle || true
-          # Add universal APK config
-          sed -i '/android {/a \    splits { abi { enable false } }' app/build.gradle || true
-          cat app/build.gradle
+          if [ -f package.json ]; then
+            npm ci || npm install
+          else
+            echo "No package.json found - initializing fresh project"
+          fi
 
-      - name: Sync Capacitor
-        run: npx cap sync android
-
-      - name: Generate debug keystore
+      # ============ 7. CONFIGURE APP (replace placeholders) ============
+      - name: 🎨 Configure app with store data
+        env:
+          STORE_URL: ${{ steps.inputs.outputs.store_url }}
+          APP_NAME: ${{ steps.inputs.outputs.app_name }}
+          PRIMARY_COLOR: ${{ steps.inputs.outputs.primary_color }}
+          LOGO_URL: ${{ steps.inputs.outputs.logo_url }}
+          WHATSAPP_NUMBER: ${{ steps.inputs.outputs.whatsapp_number }}
+          ORDER_ID: ${{ steps.inputs.outputs.order_id }}
         run: |
-          keytool -genkeypair \
+          echo "=== Build Configuration ==="
+          echo "Store URL: $STORE_URL"
+          echo "App Name: $APP_NAME"
+          echo "Primary Color: #$PRIMARY_COLOR"
+          echo "Logo URL: $LOGO_URL"
+          echo "WhatsApp: $WHATSAPP_NUMBER"
+          echo "Order ID: $ORDER_ID"
+          echo "============================="
+
+          # Make build script executable and run it
+          chmod +x ./scripts/configure-app.sh
+          ./scripts/configure-app.sh
+
+      # ============ 8. SYNC CAPACITOR ============
+      - name: 🔄 Sync Capacitor
+        run: |
+          npx cap sync android || {
+            echo "⚠️ Cap sync failed, checking configuration..."
+            cat capacitor.config.ts 2>/dev/null || cat capacitor.config.json 2>/dev/null
+            exit 1
+          }
+
+      # ============ 9. GENERATE DEBUG KEYSTORE (the fix) ============
+      - name: 🔑 Generate debug keystore
+        run: |
+          echo "=== Generating fresh debug keystore ==="
+          
+          # Create .android directory
+          mkdir -p ~/.android
+          
+          # Generate a fresh debug keystore (validity 10000 days)
+          keytool \
+            -genkeypair \
             -v \
-            -keystore debug.keystore \
+            -keystore ~/.android/debug.keystore \
             -alias androiddebugkey \
+            -storepass android \
+            -keypass android \
             -keyalg RSA \
             -keysize 2048 \
             -validity 10000 \
-            -storepass android \
-            -keypass android \
-            -dname "CN=Android Debug,O=Android,C=US"
-
-      - name: Configure signing
-        run: |
-          cd android
-          cat >> app/build.gradle << 'GRADLE_EOF'
+            -dname "CN=Android Debug, O=Android, C=US"
           
-          android.signingConfigs.debug {
-              storeFile file('../../debug.keystore')
-              storePassword 'android'
-              keyAlias 'androiddebugkey'
-              keyPassword 'android'
-          }
-          android.buildTypes.debug.signingConfig = android.signingConfigs.debug
-          GRADLE_EOF
+          echo "✅ Debug keystore generated"
+          ls -la ~/.android/debug.keystore
+          
+          # Also copy to project-level location as backup
+          cp ~/.android/debug.keystore ./android/app/debug.keystore 2>/dev/null || true
+          
+          # Print fingerprint for verification
+          echo "=== Keystore fingerprint ==="
+          keytool -list -v -keystore ~/.android/debug.keystore -alias androiddebugkey -storepass android | grep -E "SHA1|SHA256|Valid" || true
 
-      - name: Build APK
+      # ============ 10. BUILD APK ============
+      - name: 🔨 Build Debug APK
+        working-directory: android
         run: |
-          cd android
-          ./gradlew assembleDebug
-          ls -la app/build/outputs/apk/debug/
+          echo "=== Building APK ==="
+          
+          # Clean first
+          ./gradlew clean --no-daemon || true
+          
+          # Build debug APK with stacktrace for better error visibility
+          ./gradlew assembleDebug --no-daemon --stacktrace --info || {
+            echo "❌ Build failed. Dumping recent logs..."
+            echo "=== app/build.gradle ==="
+            cat app/build.gradle 2>/dev/null | head -80
+            echo "=== Build outputs ==="
+            ls -la app/build/outputs/ 2>/dev/null || true
+            exit 1
+          }
 
-      - name: Upload APK artifact
+      # ============ 11. VERIFY APK EXISTS ============
+      - name: ✅ Verify APK
+        run: |
+          echo "=== Looking for APK ==="
+          find android -name "*.apk" -type f 2>/dev/null
+          
+          APK_PATH=$(find android -name "*.apk" -type f | head -1)
+          
+          if [ -z "$APK_PATH" ]; then
+            echo "❌ No APK found!"
+            exit 1
+          fi
+          
+          echo "✅ APK found: $APK_PATH"
+          ls -la "$APK_PATH"
+          
+          # Copy to known location
+          mkdir -p output
+          cp "$APK_PATH" "output/${{ steps.inputs.outputs.order_id }}-tatbiqi.apk"
+          
+          # Get APK info
+          echo "=== APK Info ==="
+          AAPT=$(ls $ANDROID_HOME/build-tools/*/aapt 2>/dev/null | head -1)
+          if [ -n "$AAPT" ]; then
+            $AAPT dump badging "output/${{ steps.inputs.outputs.order_id }}-tatbiqi.apk" | head -20
+          fi
+
+      # ============ 12. UPLOAD ARTIFACT ============
+      - name: 📤 Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: app-${{ github.event.inputs.order_id || github.event.client_payload.order_id }}
-          path: android/app/build/outputs/apk/debug/app-debug.apk
+          name: tatbiqi-apk-${{ steps.inputs.outputs.order_id }}
+          path: output/*.apk
           retention-days: 30
+          if-no-files-found: error
+
+      # ============ 13. SUMMARY ============
+      - name: 📋 Build summary
+        if: always()
+        run: |
+          echo "## 🏗️ Build Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Order ID | ${{ steps.inputs.outputs.order_id }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| App Name | ${{ steps.inputs.outputs.app_name }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Store URL | ${{ steps.inputs.outputs.store_url }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Status | ${{ job.status }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 📥 Download APK" >> $GITHUB_STEP_SUMMARY
+          echo "APK available in workflow artifacts (retained 30 days)" >> $GITHUB_STEP_SUMMARY

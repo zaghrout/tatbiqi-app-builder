@@ -1,25 +1,20 @@
 {
-  "appId": "sa.tatbiqi.app",
+  "appId": "com.tatbiqi.app",
   "appName": "Tatbiqi App",
   "webDir": "src",
+  "server": {
+    "androidScheme": "https"
+  },
   "android": {
     "allowMixedContent": true,
+    "captureInput": true,
     "webContentsDebuggingEnabled": false
   },
   "plugins": {
     "SplashScreen": {
       "launchShowDuration": 2000,
-      "launchAutoHide": true,
       "backgroundColor": "#0F766E",
-      "androidScaleType": "CENTER_CROP",
-      "showSpinner": false,
-      "android": {
-        "backgroundColor": "#0F766E"
-      }
-    },
-    "StatusBar": {
-      "style": "DARK",
-      "backgroundColor": "#0F766E"
+      "showSpinner": false
     }
   }
 }

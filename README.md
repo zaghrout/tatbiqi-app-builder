@@ -1,68 +1,30 @@
 # Tatbiqi App Builder
 
-تطبيق موبايل (WebView wrapper) بيتولّد تلقائياً لكل متجر.
+GitHub Actions workflow that builds Android APK for Tatbiqi SaaS platform stores.
 
-## كيف يعمل؟
+## How It Works
 
-```
-1. التاجر يطلب تطبيق في tatbiqii.com
-   ↓
-2. النظام يبعت طلب لـ GitHub Actions
-   ↓
-3. GitHub Actions يبني APK حقيقي
-   ↓
-4. APK بيتخزّن كـ artifact
-   ↓
-5. التاجر ينزّله من الـ Dashboard
-```
+1. Main app (tatbiqi.com) triggers `repository_dispatch` with store data
+2. Workflow runs `scripts/configure-app.sh` to inject store name, URL, colors, logo
+3. Capacitor syncs the web assets to native Android
+4. Gradle builds the debug APK (with auto-generated debug keystore)
+5. APK uploaded as artifact (30 days retention)
 
-## بنية المشروع
+## Trigger Build
 
-```
-├── .github/workflows/
-│   └── build-apk.yml          # GitHub Actions pipeline
-├── src/
-│   ├── index.html              # HTML template (مع placeholders)
-│   ├── styles.css              # CSS template
-│   └── app.js                  # App logic (WebView + FCM)
-├── scripts/
-│   └── build-app.js            # Build script (يستبدل الـ placeholders)
-├── capacitor.config.ts         # Capacitor config
-└── package.json
-```
+### From Tatbiqi Dashboard
+POST to `/api/build/trigger` from the app-management page.
 
-## تخصيص التطبيق
+### Manual (for testing)
+Run workflow manually from GitHub Actions tab with inputs:
+- `store_url`: e.g. `https://example.salla.sa`
+- `app_name`: e.g. `متجري`
+- `primary_color`: e.g. `0F766E` (without #)
+- `logo_url`: optional
+- `whatsapp_number`: optional
+- `order_id`: e.g. `TEST-001`
 
-التطبيق بيتخصص عن طريق استبدال الـ placeholders:
-
-| Placeholder | الوصف |
-|---|---|
-| `__APP_NAME__` | اسم التطبيق |
-| `__APP_URL__` | رابط المتجر |
-| `__PRIMARY_COLOR__` | اللون الأساسي |
-| `__LOGO_HTML__` | الشعار |
-| `__WHATSAPP_URL__` | رابط واتساب |
-| `__API_URL__` | رابط الـ API |
-
-## بناء يدوي
-
-```bash
-# تخصيص التطبيق
-node scripts/build-app.js \
-  --url=https://store.salla.sa \
-  --name="متجر الأناقة" \
-  --color=#0F766E \
-  --logo=https://... \
-  --whatsapp=+9665XXXXXXXX
-
-# بناء APK
-npx cap add android
-npx cap sync android
-cd android && ./gradlew assembleDebug
-```
-
-## النتيجة
-
-```
-android/app/build/outputs/apk/debug/app-debug.apk
-```
+## Output
+- APK artifact: `tatbiqi-apk-{order_id}`
+- Available in GitHub Actions artifacts section
+- Retained for 30 days
