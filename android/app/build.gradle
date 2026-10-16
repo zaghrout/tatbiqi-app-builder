@@ -12,30 +12,43 @@ android {
         versionName "1.0.0"
     }
 
+    // ===== STABLE SIGNING (uses committed keystore - same key for ALL builds) =====
     signingConfigs {
         debug {
-            def keystoreFile = file("${System.getProperty('user.home')}/.android/debug.keystore")
-            def projectKeystore = file("debug.keystore")
-            if (projectKeystore.exists()) {
-                storeFile projectKeystore
-            } else if (keystoreFile.exists()) {
-                storeFile keystoreFile
+            // Use the stable keystore committed to the repo
+            def stableKeystore = file("tatbiqi-debug.keystore")
+            if (stableKeystore.exists()) {
+                storeFile stableKeystore
+                storePassword 'tatbiqi123'
+                keyAlias 'tatbiqi-debug'
+                keyPassword 'tatbiqi123'
+            } else {
+                // Fallback to runner's default debug keystore
+                def fallback = file("${System.getProperty('user.home')}/.android/debug.keystore")
+                if (fallback.exists()) {
+                    storeFile fallback
+                    storePassword 'android'
+                    keyAlias 'androiddebugkey'
+                    keyPassword 'android'
+                }
             }
-            storePassword 'android'
-            keyAlias 'androiddebugkey'
-            keyPassword 'android'
         }
         release {
-            def keystoreFile = file("${System.getProperty('user.home')}/.android/debug.keystore")
-            def projectKeystore = file("debug.keystore")
-            if (projectKeystore.exists()) {
-                storeFile projectKeystore
-            } else if (keystoreFile.exists()) {
-                storeFile keystoreFile
+            def stableKeystore = file("tatbiqi-debug.keystore")
+            if (stableKeystore.exists()) {
+                storeFile stableKeystore
+                storePassword 'tatbiqi123'
+                keyAlias 'tatbiqi-debug'
+                keyPassword 'tatbiqi123'
+            } else {
+                def fallback = file("${System.getProperty('user.home')}/.android/debug.keystore")
+                if (fallback.exists()) {
+                    storeFile fallback
+                    storePassword 'android'
+                    keyAlias 'androiddebugkey'
+                    keyPassword 'android'
+                }
             }
-            storePassword 'android'
-            keyAlias 'androiddebugkey'
-            keyPassword 'android'
         }
     }
 
@@ -43,10 +56,19 @@ android {
         debug {
             signingConfig signingConfigs.debug
             minifyEnabled false
+            // Enable all signature schemes for max compatibility
+            v1SigningEnabled true
+            v2SigningEnabled true
+            v3SigningEnabled true
+            v4SigningEnabled false
         }
         release {
             signingConfig signingConfigs.release
             minifyEnabled false
+            v1SigningEnabled true
+            v2SigningEnabled true
+            v3SigningEnabled true
+            v4SigningEnabled false
         }
     }
 
@@ -69,11 +91,7 @@ android {
 
 dependencies {
     implementation fileTree(dir: 'libs', include: ['*.jar', '*.aar'])
-
-    // Capacitor Android - included as local module via settings.gradle
     implementation project(':capacitor-android')
-
-    // AndroidX + Material
     implementation 'androidx.appcompat:appcompat:1.7.0'
     implementation 'com.google.android.material:material:1.12.0'
     implementation 'androidx.constraintlayout:constraintlayout:2.1.4'
