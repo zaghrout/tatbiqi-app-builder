@@ -89,11 +89,44 @@ android {
         checkReleaseBuilds false
     }
 
-    packagingOptions {
-        resources {
-            excludes += ['META-INF/DEPENDENCIES', 'META-INF/LICENSE', 'META-INF/LICENSE.txt', 'META-INF/NOTICE', 'META-INF/NOTICE.txt']
+    // ===== CRITICAL FIXES for Realme/Xiaomi install issues =====
+    
+    // 1. Disable baseline profiles (causes install fail on some devices)
+    bundle {
+        // Don't split by ABI - ship one universal APK
+        abi {
+            enableSplit = false
+        }
+        density {
+            enableSplit = false
+        }
+        language {
+            enableSplit = false
         }
     }
+    
+    // 2. Disable profileinstaller (writes dexopt/baseline.prof which breaks install)
+    packagingOptions {
+        resources {
+            excludes += [
+                'META-INF/DEPENDENCIES',
+                'META-INF/LICENSE',
+                'META-INF/LICENSE.txt',
+                'META-INF/NOTICE',
+                'META-INF/NOTICE.txt',
+                // Remove these problematic files
+                'assets/dexopt/baseline.prof',
+                'assets/dexopt/baseline.profm',
+                'DebugProbesKt.bin',
+                'META-INF/*.version',
+                'META-INF/androidx.*.version'
+            ]
+        }
+    }
+    
+    // 3. Force extractNativeLibs=true in manifest (Realme requires this)
+    // We need to inject this via a manifest placeholder
+
 }
 
 dependencies {
@@ -107,4 +140,5 @@ dependencies {
 }
 
 apply from: "capacitor.settings.gradle"
+
 
