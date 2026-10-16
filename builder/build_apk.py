@@ -1,0 +1,356 @@
+#!/usr/bin/env python3
+"""
+Tatbiqi APK builder (v3).
+
+Builds a signed WebView APK for one store with aapt2 + d8 + apksigner, no Gradle.
+Runs on GitHub Actions (see .github/workflows/build-apk.yml) or locally.
+
+Per-store values never go into Java source. They are written to
+assets/tatbiqi.json and read by MainActivity at runtime.
+
+Usage:
+  python3 builder/build_apk.py \
+      --store-url https://mystore.salla.sa --app-name "متجري" \
+      --package-name sa.tatbiqi.mystore --primary-color 0F766E \
+      --whatsapp 966555555555 --logo-url https://.../logo.png \
+      --version-code 1 --version-name 1.0.0 --output out/app.apk
+
+Environment:
+  ANDROID_HOME          Android SDK root (required)
+  BUILD_TOOLS_VERSION   default 34.0.0
+  ANDROID_PLATFORM      default android-34
+  KEYSTORE_PATH, KEYSTORE_PASSWORD, KEY_ALIAS, KEY_PASSWORD
+                        signing key. If KEYSTORE_PATH is unset and
+                        --throwaway-key is passed, a temporary key is generated
+                        (for local testing only: such APKs can never be updated).
+"""
+import argparse
+import io
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import urllib.request
+from pathlib import Path
+from xml.sax.saxutils import escape as xml_escape
+
+HERE = Path(__file__).resolve().parent
+TEMPLATE_JAVA = HERE / "template" / "MainActivity.java"
+JAVA_PACKAGE = "com.tatbiqi.app"  # code package; the app id is --package-name
+
+MAX_LOGO_BYTES = 5 * 1024 * 1024
+ICON_SIZES = [
+    ("mipmap-mdpi", 48),
+    ("mipmap-hdpi", 72),
+    ("mipmap-xhdpi", 96),
+    ("mipmap-xxhdpi", 144),
+    ("mipmap-xxxhdpi", 192),
+]
+
+
+class BuildError(Exception):
+    pass
+
+
+# ---------------------------------------------------------------- validation
+
+def validate(args):
+    url = args.store_url.strip()
+    if not re.fullmatch(r"https://[A-Za-z0-9.-]+(:\d+)?(/[^\s\"'<>\\]*)?", url):
+        raise BuildError("store-url must be an https:// URL")
+
+    name = args.app_name.strip()
+    if not name or len(name) > 50:
+        raise BuildError("app-name must be 1-50 characters")
+    if any(ord(c) < 32 for c in name):
+        raise BuildError("app-name contains control characters")
+
+    color = args.primary_color.strip().lstrip("#")
+    if not re.fullmatch(r"[0-9A-Fa-f]{6}", color):
+        raise BuildError("primary-color must be 6 hex digits")
+
+    pkg = args.package_name.strip()
+    if not re.fullmatch(r"[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*){2,}", pkg) or len(pkg) > 100:
+        raise BuildError("package-name must look like sa.tatbiqi.storename")
+
+    wa = re.sub(r"\D", "", args.whatsapp or "")
+    if wa and not (8 <= len(wa) <= 15):
+        raise BuildError("whatsapp must be 8-15 digits with country code")
+
+    msg = (args.whatsapp_message or "").strip()[:300]
+
+    logo = (args.logo_url or "").strip()
+    if logo and not re.fullmatch(r"https?://\S+", logo):
+        raise BuildError("logo-url must be an http(s) URL")
+
+    if not (1 <= args.version_code <= 2_100_000_000):
+        raise BuildError("version-code out of range")
+    if not re.fullmatch(r"\d+(\.\d+){0,3}", args.version_name):
+        raise BuildError("version-name must look like 1.0.0")
+
+    return {
+        "store_url": url,
+        "app_name": name,
+        "color": color.upper(),
+        "package": pkg,
+        "whatsapp": wa,
+        "whatsapp_message": msg,
+        "logo_url": logo,
+    }
+
+
+# ---------------------------------------------------------------- tools
+
+def sdk_paths():
+    home = os.environ.get("ANDROID_HOME") or os.environ.get("ANDROID_SDK_ROOT")
+    if not home:
+        raise BuildError("ANDROID_HOME is not set")
+    bt = Path(home) / "build-tools" / os.environ.get("BUILD_TOOLS_VERSION", "34.0.0")
+    platform = Path(home) / "platforms" / os.environ.get("ANDROID_PLATFORM", "android-34") / "android.jar"
+    for p in (bt / "aapt2", bt / "d8", bt / "zipalign", bt / "apksigner", platform):
+        if not p.exists():
+            raise BuildError(f"missing SDK file: {p}")
+    return bt, platform
+
+
+def run(cmd, secret=None):
+    shown = " ".join(str(c) for c in cmd)
+    if secret:
+        shown = shown.replace(secret, "***")
+    print(f"$ {shown}", flush=True)
+    r = subprocess.run([str(c) for c in cmd], capture_output=True, text=True)
+    if r.stdout.strip():
+        print(r.stdout.rstrip())
+    if r.returncode != 0:
+        err = r.stderr if not secret else r.stderr.replace(secret, "***")
+        print(err, file=sys.stderr)
+        raise BuildError(f"step failed: {Path(str(cmd[0])).name}")
+    return r
+
+
+# ---------------------------------------------------------------- resources
+
+def write_manifest(work, cfg):
+    label = xml_escape(cfg["app_name"], {'"': "&quot;"})
+    manifest = f'''<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="{JAVA_PACKAGE}">
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <application
+        android:label="{label}"
+        android:icon="@mipmap/ic_launcher"
+        android:allowBackup="true"
+        android:supportsRtl="true"
+        android:usesCleartextTraffic="false"
+        android:hardwareAccelerated="true">
+        <activity
+            android:name="{JAVA_PACKAGE}.MainActivity"
+            android:exported="true"
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|locale|smallestScreenSize|screenLayout|uiMode">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>
+'''
+    (work / "AndroidManifest.xml").write_text(manifest, encoding="utf-8")
+
+
+def write_default_icon(res, color):
+    d = res / "mipmap"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "ic_launcher.xml").write_text(f'''<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="48dp" android:height="48dp"
+    android:viewportWidth="48" android:viewportHeight="48">
+    <path android:fillColor="#{color}" android:pathData="M8,0h32a8,8 0,0 1,8 8v32a8,8 0,0 1,-8 8h-32a8,8 0,0 1,-8 -8v-32a8,8 0,0 1,8 -8z" />
+    <path android:fillColor="#FFFFFF"
+        android:pathData="M16,19 L32,19 L33,37 L15,37 Z M20,19 v-2 a4,4 0,0 1,8 0 v2 h-2 v-2 a2,2 0,0 0,-4 0 v2 z" />
+</vector>
+''', encoding="utf-8")
+
+
+def download_logo(url):
+    req = urllib.request.Request(url, headers={"User-Agent": "TatbiqiBuilder/3"})
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        data = resp.read(MAX_LOGO_BYTES + 1)
+    if len(data) > MAX_LOGO_BYTES:
+        raise BuildError("logo is larger than 5MB")
+    return data
+
+
+def write_logo_icons(res, logo_bytes, color):
+    """Square icon: logo centered on a rounded tile of the store color."""
+    from PIL import Image, ImageDraw
+
+    logo = Image.open(io.BytesIO(logo_bytes))
+    logo.load()
+    logo = logo.convert("RGBA")
+    bbox = logo.getbbox()
+    if bbox:
+        logo = logo.crop(bbox)
+
+    bg = tuple(int(color[i:i + 2], 16) for i in (0, 2, 4)) + (255,)
+    for folder, size in ICON_SIZES:
+        scale = 4  # draw big, then downsample for smooth edges
+        big = size * scale
+        tile = Image.new("RGBA", (big, big), (0, 0, 0, 0))
+        mask = Image.new("L", (big, big), 0)
+        ImageDraw.Draw(mask).rounded_rectangle((0, 0, big - 1, big - 1), radius=big // 6, fill=255)
+        tile.paste(Image.new("RGBA", (big, big), bg), (0, 0), mask)
+
+        inner = int(big * 0.72)
+        w, h = logo.size
+        ratio = min(inner / w, inner / h)
+        fitted = logo.resize((max(1, int(w * ratio)), max(1, int(h * ratio))), Image.LANCZOS)
+        tile.alpha_composite(fitted, ((big - fitted.width) // 2, (big - fitted.height) // 2))
+
+        out = res / folder / "ic_launcher.png"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        tile.resize((size, size), Image.LANCZOS).save(out, "PNG", optimize=True)
+
+
+def write_assets(work, cfg):
+    assets = work / "assets"
+    assets.mkdir()
+    config = {
+        "storeUrl": cfg["store_url"],
+        "primaryColor": "#" + cfg["color"],
+        "whatsappNumber": cfg["whatsapp"],
+        "whatsappMessage": cfg["whatsapp_message"],
+    }
+    (assets / "tatbiqi.json").write_text(json.dumps(config, ensure_ascii=False), encoding="utf-8")
+    return assets
+
+
+# ---------------------------------------------------------------- signing
+
+def signing_key(work, throwaway):
+    path = os.environ.get("KEYSTORE_PATH")
+    if path:
+        for var in ("KEYSTORE_PASSWORD", "KEY_ALIAS"):
+            if not os.environ.get(var):
+                raise BuildError(f"{var} is not set")
+        return (path, os.environ["KEYSTORE_PASSWORD"], os.environ["KEY_ALIAS"],
+                os.environ.get("KEY_PASSWORD") or os.environ["KEYSTORE_PASSWORD"])
+    if not throwaway:
+        raise BuildError("KEYSTORE_PATH is not set (pass --throwaway-key for a local test build)")
+    ks = work / "throwaway.keystore"
+    pw = "throwaway-" + os.urandom(6).hex()
+    run(["keytool", "-genkeypair", "-keystore", ks, "-storepass", pw, "-keypass", pw,
+         "-alias", "test", "-keyalg", "RSA", "-keysize", "2048", "-validity", "30",
+         "-dname", "CN=Tatbiqi Test"], secret=pw)
+    return str(ks), pw, "test", pw
+
+
+# ---------------------------------------------------------------- build
+
+def build(args):
+    cfg = validate(args)
+    bt, platform = sdk_paths()
+    out = Path(args.output).resolve()
+    out.parent.mkdir(parents=True, exist_ok=True)
+
+    work = Path(tempfile.mkdtemp(prefix="tatbiqi-"))
+    try:
+        res = work / "res"
+        res.mkdir()
+        (work / "classes").mkdir()
+        (work / "dex").mkdir()
+
+        write_manifest(work, cfg)
+        assets = write_assets(work, cfg)
+
+        icon_source = "default"
+        if cfg["logo_url"]:
+            try:
+                write_logo_icons(res, download_logo(cfg["logo_url"]), cfg["color"])
+                icon_source = "logo"
+            except Exception as e:  # a bad logo should not fail the build
+                print(f"⚠️  logo skipped: {e}")
+        if icon_source == "default":
+            write_default_icon(res, cfg["color"])
+
+        print("\n🔨 javac", flush=True)
+        run(["javac", "--release", "8", "-nowarn", "-encoding", "UTF-8",
+             "-classpath", platform,
+             "-d", work / "classes", TEMPLATE_JAVA])
+        classes = [str(p) for p in (work / "classes").rglob("*.class")]
+
+        print("\n📦 d8", flush=True)
+        run([bt / "d8", "--release", "--min-api", "23", "--lib", platform,
+             "--output", work / "dex"] + classes)
+
+        print("\n🎨 aapt2", flush=True)
+        run([bt / "aapt2", "compile", "--dir", res, "-o", work / "res.zip"])
+        run([bt / "aapt2", "link",
+             "--manifest", work / "AndroidManifest.xml",
+             "-I", platform,
+             "--rename-manifest-package", cfg["package"],
+             "--min-sdk-version", "23", "--target-sdk-version", "34",
+             "--version-code", str(args.version_code),
+             "--version-name", args.version_name,
+             "-A", assets,
+             "-o", work / "unsigned.apk", work / "res.zip"])
+
+        run(["zip", "-j", "-q", work / "unsigned.apk", work / "dex" / "classes.dex"])
+        run([bt / "zipalign", "-f", "-p", "4", work / "unsigned.apk", work / "aligned.apk"])
+
+        print("\n🔑 apksigner", flush=True)
+        ks, ks_pw, alias, key_pw = signing_key(work, args.throwaway_key)
+        env_ks = {"TATBIQI_KS_PASS": ks_pw, "TATBIQI_KEY_PASS": key_pw}
+        os.environ.update(env_ks)
+        run([bt / "apksigner", "sign", "--ks", ks, "--ks-key-alias", alias,
+             "--ks-pass", "env:TATBIQI_KS_PASS", "--key-pass", "env:TATBIQI_KEY_PASS",
+             "--v1-signing-enabled", "true", "--v2-signing-enabled", "true",
+             "--v3-signing-enabled", "true",
+             "--out", out, work / "aligned.apk"])
+        run([bt / "apksigner", "verify", out])
+
+        result = {
+            "apk": str(out),
+            "size": out.stat().st_size,
+            "package": cfg["package"],
+            "versionCode": args.version_code,
+            "versionName": args.version_name,
+            "icon": icon_source,
+        }
+        print(f"\n🎉 {json.dumps(result, ensure_ascii=False)}")
+        if args.result_json:
+            Path(args.result_json).write_text(json.dumps(result), encoding="utf-8")
+        return result
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def main():
+    p = argparse.ArgumentParser(description="Build a Tatbiqi store APK")
+    p.add_argument("--store-url", required=True)
+    p.add_argument("--app-name", required=True)
+    p.add_argument("--package-name", required=True)
+    p.add_argument("--primary-color", default="0F766E")
+    p.add_argument("--whatsapp", default="")
+    p.add_argument("--whatsapp-message", default="")
+    p.add_argument("--logo-url", default="")
+    p.add_argument("--version-code", type=int, default=1)
+    p.add_argument("--version-name", default="1.0.0")
+    p.add_argument("--output", required=True)
+    p.add_argument("--result-json", default="")
+    p.add_argument("--throwaway-key", action="store_true",
+                   help="sign with a temporary key when KEYSTORE_PATH is unset (local tests only)")
+    args = p.parse_args()
+    try:
+        build(args)
+    except BuildError as e:
+        print(f"❌ {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

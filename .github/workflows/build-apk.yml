@@ -1,4 +1,16 @@
 name: Build Android APK
+run-name: "Build ${{ github.event.client_payload.order_number || inputs.order_number }}"
+
+# Triggered by the dashboard (repository_dispatch) or by hand for testing.
+# Builds with aapt2 + d8 + apksigner (no Gradle), uploads the APK to R2,
+# then reports back to the dashboard with a signed callback.
+#
+# Repository secrets:
+#   KEYSTORE_BASE64, KEYSTORE_PASSWORD, KEY_ALIAS, KEY_PASSWORD
+#   R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_BUCKET
+#   BUILD_CALLBACK_SECRET   (same value as on Vercel)
+# Repository variable (optional):
+#   TATBIQI_CALLBACK_URL    default https://app.tatbiqii.com/api/build/callback
 
 on:
   repository_dispatch:
@@ -6,134 +18,144 @@ on:
   workflow_dispatch:
     inputs:
       store_url:
-        description: 'Store URL'
+        description: Store URL (https)
         required: true
-        default: 'https://example.salla.sa'
+        default: https://salla.sa
       app_name:
-        description: 'App Name'
+        description: App name
         required: true
-        default: 'متجري'
+        default: متجري
+      package_name:
+        description: Package name
+        required: true
+        default: sa.tatbiqi.test
       primary_color:
-        description: 'Color hex (without #)'
-        required: false
-        default: '0F766E'
+        description: Color hex without #
+        default: 0F766E
       logo_url:
-        description: 'Logo URL'
-        required: false
+        description: Logo URL (optional)
         default: ''
       whatsapp_number:
-        description: 'WhatsApp'
-        required: false
+        description: WhatsApp with country code (optional)
         default: ''
-      order_id:
-        description: 'Order ID'
-        required: false
-        default: 'TEST-001'
+      order_number:
+        description: Order number
+        required: true
+        default: TEST-001
+      version_code:
+        description: Version code
+        default: '1'
+
+permissions:
+  contents: read
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
-    permissions:
-      contents: read
-      actions: write
+    timeout-minutes: 15
+    env:
+      STORE_URL: ${{ github.event.client_payload.store_url || inputs.store_url }}
+      APP_NAME: ${{ github.event.client_payload.app_name || inputs.app_name }}
+      PACKAGE_NAME: ${{ github.event.client_payload.package_name || inputs.package_name }}
+      PRIMARY_COLOR: ${{ github.event.client_payload.primary_color || inputs.primary_color || '0F766E' }}
+      LOGO_URL: ${{ github.event.client_payload.logo_url || inputs.logo_url }}
+      WHATSAPP: ${{ github.event.client_payload.whatsapp_number || inputs.whatsapp_number }}
+      WHATSAPP_MESSAGE: ${{ github.event.client_payload.whatsapp_message }}
+      ORDER_NUMBER: ${{ github.event.client_payload.order_number || inputs.order_number }}
+      BUILD_ID: ${{ github.event.client_payload.build_id }}
+      VERSION_CODE: ${{ github.event.client_payload.version_code || inputs.version_code || '1' }}
+      VERSION_NAME: ${{ github.event.client_payload.version_name || '1.0.0' }}
+      CALLBACK_URL: ${{ vars.TATBIQI_CALLBACK_URL || 'https://app.tatbiqii.com/api/build/callback' }}
+      BUILD_CALLBACK_SECRET: ${{ secrets.BUILD_CALLBACK_SECRET }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
 
     steps:
-      - name: 📥 Checkout
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: 🟢 Setup Node 20
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
+      - name: Check inputs
+        run: |
+          [[ "$ORDER_NUMBER" =~ ^[A-Za-z0-9_-]{1,64}$ ]] || { echo "bad order number"; exit 1; }
+          [[ -z "$BUILD_ID" || "$BUILD_ID" =~ ^[A-Za-z0-9_-]{1,64}$ ]] || { echo "bad build id"; exit 1; }
+          [[ "$VERSION_CODE" =~ ^[0-9]{1,10}$ ]] || { echo "bad version code"; exit 1; }
 
-      - name: ☕ Setup Java 17
+      - name: Report building
+        run: python3 builder/callback.py --status building || true
+
+      - name: Setup Java 17
         uses: actions/setup-java@v4
         with:
-          distribution: 'temurin'
+          distribution: temurin
           java-version: '17'
 
-      - name: 🤖 Configure Android SDK (preinstalled on runner)
+      - name: Android SDK (platform 34 + build-tools 34)
         run: |
-          echo "ANDROID_HOME=$ANDROID_HOME"
-          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "platforms;android-34" "build-tools;34.0.0" || true
+          SDKM="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$SDKM" --licenses > /dev/null || true
+          "$SDKM" --install "platforms;android-34" "build-tools;34.0.0" > /dev/null
+          ls "$ANDROID_HOME/build-tools/34.0.0/aapt2" "$ANDROID_HOME/platforms/android-34/android.jar"
 
-      - name: 🛠️ Setup Gradle 8.7
-        uses: gradle/actions/setup-gradle@v3
-        with:
-          gradle-version: '8.7'
+      - name: Python deps
+        run: python3 -m pip install --quiet pillow
 
-      - name: 📜 Generate Gradle wrapper
-        working-directory: android
-        run: |
-          if [ ! -f ./gradlew ]; then
-            gradle wrapper --gradle-version 8.7 --distribution-type bin
-          fi
-          chmod +x ./gradlew
-
-      - name: 📝 Read inputs
-        id: inputs
-        run: |
-          if [ "${{ github.event_name }}" = "repository_dispatch" ]; then
-            echo "store_url=${{ github.event.client_payload.store_url }}" >> $GITHUB_OUTPUT
-            echo "app_name=${{ github.event.client_payload.app_name }}" >> $GITHUB_OUTPUT
-            echo "primary_color=${{ github.event.client_payload.primary_color }}" >> $GITHUB_OUTPUT
-            echo "logo_url=${{ github.event.client_payload.logo_url }}" >> $GITHUB_OUTPUT
-            echo "whatsapp_number=${{ github.event.client_payload.whatsapp_number }}" >> $GITHUB_OUTPUT
-            echo "order_id=${{ github.event.client_payload.order_id }}" >> $GITHUB_OUTPUT
-          else
-            echo "store_url=${{ inputs.store_url }}" >> $GITHUB_OUTPUT
-            echo "app_name=${{ inputs.app_name }}" >> $GITHUB_OUTPUT
-            echo "primary_color=${{ inputs.primary_color }}" >> $GITHUB_OUTPUT
-            echo "logo_url=${{ inputs.logo_url }}" >> $GITHUB_OUTPUT
-            echo "whatsapp_number=${{ inputs.whatsapp_number }}" >> $GITHUB_OUTPUT
-            echo "order_id=${{ inputs.order_id }}" >> $GITHUB_OUTPUT
-          fi
-
-      - name: 📦 Install deps
-        run: npm ci || npm install
-
-      - name: 🎨 Configure app
+      - name: Signing key
         env:
-          STORE_URL: ${{ steps.inputs.outputs.store_url }}
-          APP_NAME: ${{ steps.inputs.outputs.app_name }}
-          PRIMARY_COLOR: ${{ steps.inputs.outputs.primary_color }}
-          LOGO_URL: ${{ steps.inputs.outputs.logo_url }}
-          WHATSAPP_NUMBER: ${{ steps.inputs.outputs.whatsapp_number }}
-          ORDER_ID: ${{ steps.inputs.outputs.order_id }}
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
         run: |
-          chmod +x ./scripts/configure-app.sh
-          ./scripts/configure-app.sh
+          [ -n "$KEYSTORE_BASE64" ] || { echo "KEYSTORE_BASE64 secret is missing"; exit 1; }
+          echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.keystore"
+          echo "KEYSTORE_PATH=$RUNNER_TEMP/release.keystore" >> "$GITHUB_ENV"
 
-      - name: 🔄 Capacitor sync
-        run: npx cap sync android || { cat capacitor.config.json; exit 1; }
-
-      - name: 🔑 Generate debug keystore
+      - name: Build APK
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
-          mkdir -p ~/.android
-          keytool -genkeypair -v \
-            -keystore ~/.android/debug.keystore \
-            -alias androiddebugkey \
-            -storepass android -keypass android \
-            -keyalg RSA -keysize 2048 -validity 10000 \
-            -dname "CN=Android Debug, O=Android, C=US"
-          cp ~/.android/debug.keystore ./android/app/debug.keystore
+          python3 builder/build_apk.py \
+            --store-url "$STORE_URL" \
+            --app-name "$APP_NAME" \
+            --package-name "$PACKAGE_NAME" \
+            --primary-color "$PRIMARY_COLOR" \
+            --logo-url "$LOGO_URL" \
+            --whatsapp "$WHATSAPP" \
+            --whatsapp-message "$WHATSAPP_MESSAGE" \
+            --version-code "$VERSION_CODE" \
+            --version-name "$VERSION_NAME" \
+            --output "out/app.apk" \
+            --result-json "out/result.json"
 
-      - name: 🔨 Build APK
-        working-directory: android
-        run: ./gradlew assembleRelease --no-daemon --stacktrace
-      - name: ✅ Verify + copy APK
+      - name: Upload to R2
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          AWS_REQUEST_CHECKSUM_CALCULATION: when_required
+          AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
         run: |
-          APK=$(find android -name "*.apk" -type f | head -1)
-          [ -z "$APK" ] && { echo "No APK"; exit 1; }
-          mkdir -p output
-          cp "$APK" "output/${{ steps.inputs.outputs.order_id }}-tatbiqi.apk"
-          ls -la output/
+          KEY="apks/${ORDER_NUMBER}/${VERSION_CODE}.apk"
+          aws s3 cp out/app.apk "s3://${R2_BUCKET}/${KEY}" \
+            --endpoint-url "https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com" \
+            --content-type application/vnd.android.package-archive \
+            --no-progress
+          echo "APK_KEY=$KEY" >> "$GITHUB_ENV"
 
-      - name: 📤 Upload artifact
+      - name: Keep APK as artifact (7 days)
         uses: actions/upload-artifact@v4
         with:
-          name: tatbiqi-apk-${{ steps.inputs.outputs.order_id }}
-          path: output/*.apk
-          retention-days: 30
-          if-no-files-found: error
+          name: apk-${{ env.ORDER_NUMBER }}
+          path: out/app.apk
+          retention-days: 7
+
+      - name: Report ready
+        run: python3 builder/callback.py --status ready --result-json out/result.json --apk-key "$APK_KEY"
+
+      - name: Report failure
+        if: failure()
+        run: python3 builder/callback.py --status failed --error "Build failed. See $RUN_URL" || true
+
+      - name: Clean up key
+        if: always()
+        run: rm -f "$RUNNER_TEMP/release.keystore"
