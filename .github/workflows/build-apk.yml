@@ -76,15 +76,43 @@ jobs:
             --api="https://app.tatbiqii.com"
 
       - name: Add Android platform
-        run: npx cap add android || true
+        run: npx cap add android
 
       - name: Sync Capacitor
         run: npx cap sync android
+
+      - name: Generate debug keystore
+        run: |
+          keytool -genkeypair \
+            -v \
+            -keystore debug.keystore \
+            -alias androiddebugkey \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 10000 \
+            -storepass android \
+            -keypass android \
+            -dname "CN=Android Debug,O=Android,C=US"
+
+      - name: Configure signing
+        run: |
+          cd android
+          cat >> app/build.gradle << 'GRADLE_EOF'
+          
+          android.signingConfigs.debug {
+              storeFile file('../../debug.keystore')
+              storePassword 'android'
+              keyAlias 'androiddebugkey'
+              keyPassword 'android'
+          }
+          android.buildTypes.debug.signingConfig = android.signingConfigs.debug
+          GRADLE_EOF
 
       - name: Build APK
         run: |
           cd android
           ./gradlew assembleDebug
+          ls -la app/build/outputs/apk/debug/
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
