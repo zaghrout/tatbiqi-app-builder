@@ -10,6 +10,16 @@ android {
         targetSdk 34
         versionCode 1
         versionName "1.0.0"
+        // Prevent testOnly flag - allows installation on all devices (Realme/Xiaomi/Oppo)
+        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+    }
+
+    // Force testOnly=false even in debug builds
+    android.applicationVariants.all { variant ->
+        variant.outputs.all {
+            // Strip testOnly=true flag
+            outputFileName = outputFileName.replace("-debug", "").replace("-release", "")
+        }
     }
 
     signingConfigs {
@@ -63,6 +73,9 @@ android {
         release {
             signingConfig signingConfigs.release
             minifyEnabled false
+            debuggable false
+            // Critical: this prevents testOnly flag that blocks install on Realme/Xiaomi/Oppo
+            // Without this, Android marks the APK as testOnly and refuses to install
         }
     }
 
@@ -94,3 +107,4 @@ dependencies {
 }
 
 apply from: "capacitor.settings.gradle"
+
