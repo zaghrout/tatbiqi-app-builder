@@ -184,7 +184,7 @@ public class MainActivity extends Activity {
                 + "-.9-.8-1.6-1.8-1.7-2.1-.2-.3 0-.5.1-.6l.5-.6c.2-.2.2-.3.3-.5.1-.2 0-.4 0-.5l-1-2.4c-.3-.6"
                 + "-.5-.5-.7-.5h-.6c-.2 0-.5.1-.8.4-.3.3-1 1-1 2.5s1.1 2.9 1.2 3.1c.2.2 2.1 3.2 5.1 4.5 "
                 + "2.5 1 3 .8 3.6.7.6-.1 1.9-.8 2.2-1.5.3-.7.3-1.4.2-1.5-.1-.1-.3-.2-.6-.3z\"/></svg>';"
-                + "b.style.cssText='position:fixed;bottom:20px;left:16px;width:56px;height:56px;"
+                + "b.style.cssText='position:fixed;bottom:96px;left:16px;width:56px;height:56px;"
                 + "border-radius:50%;background:#25D366;display:flex;align-items:center;"
                 + "justify-content:center;z-index:2147483646;cursor:pointer;"
                 + "box-shadow:0 4px 12px rgba(0,0,0,.3);';"
