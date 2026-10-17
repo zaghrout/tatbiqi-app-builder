@@ -164,7 +164,7 @@ public class MainActivity extends Activity {
         }
         try {
             String host = Uri.parse(url).getHost();
-            if (host == null || storeHost.length() == 0 || !host.equalsIgnoreCase(storeHost)) {
+            if (host == null || !isStoreHost(host)) {
                 return;
             }
         } catch (Exception e) {
@@ -192,6 +192,20 @@ public class MainActivity extends Activity {
                 + "(document.body||document.documentElement).appendChild(b);"
                 + "})();";
         view.evaluateJavascript(js, null);
+    }
+
+    /** Same site as the store, ignoring "www." and subdomains (e.g. shop.x.com vs x.com). */
+    private boolean isStoreHost(String host) {
+        String a = stripWww(host.toLowerCase());
+        String b = stripWww(storeHost.toLowerCase());
+        if (b.length() == 0) {
+            return false;
+        }
+        return a.equals(b) || a.endsWith("." + b) || b.endsWith("." + a);
+    }
+
+    private static String stripWww(String h) {
+        return h.startsWith("www.") ? h.substring(4) : h;
     }
 
     private class WhatsAppBridge {

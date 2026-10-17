@@ -146,6 +146,7 @@ def write_manifest(work, cfg):
         android:allowBackup="true"
         android:supportsRtl="true"
         android:usesCleartextTraffic="false"
+        android:theme="@android:style/Theme.DeviceDefault.Light.NoActionBar"
         android:hardwareAccelerated="true">
         <activity
             android:name="{JAVA_PACKAGE}.MainActivity"
