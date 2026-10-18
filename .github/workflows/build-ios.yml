@@ -1,0 +1,138 @@
+name: Build iOS app
+run-name: "iOS ${{ inputs.order_number || 'TEST-IOS' }}"
+
+# Generates the store's Xcode project (builder/build_ios.py + XcodeGen) and builds it
+# on a macOS runner. Without an Apple Developer account this proves the app compiles
+# for iPhone and gives a simulator build to try; signing and App Store upload are
+# added once a client's account exists.
+
+on:
+  push:  # TEMP: lets the branch test itself before the workflow exists on main
+    branches: [ios-builder]
+  workflow_dispatch:
+    inputs:
+      store_url:
+        description: Store URL (https)
+        required: true
+        default: https://salla.sa
+      app_name:
+        description: App name
+        required: true
+        default: متجري
+      package_name:
+        description: Package name (same as Android)
+        required: true
+        default: sa.tatbiqi.test
+      primary_color:
+        description: Color hex without #
+        default: 0F766E
+      logo_url:
+        description: Logo URL (optional)
+        default: ''
+      whatsapp_number:
+        description: WhatsApp with country code (optional)
+        default: ''
+      order_number:
+        description: Order number
+        required: true
+        default: TEST-IOS
+      version_code:
+        description: Build number
+        default: '1'
+
+permissions:
+  contents: write  # TEMP: pushes the test screenshot to the ci-screens branch
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 30
+    env:
+      ORDER_NUMBER: ${{ inputs.order_number || 'TEST-IOS' }}
+      VERSION_CODE: ${{ inputs.version_code || '1' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check inputs
+        run: |
+          [[ "$ORDER_NUMBER" =~ ^[A-Za-z0-9_-]{1,64}$ ]] || { echo "bad order number"; exit 1; }
+          [[ "$VERSION_CODE" =~ ^[0-9]{1,10}$ ]] || { echo "bad version code"; exit 1; }
+
+      - name: Tools
+        run: |
+          brew install xcodegen
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install --quiet pillow
+          echo "$RUNNER_TEMP/venv/bin" >> "$GITHUB_PATH"
+          xcodebuild -version
+
+      - name: Generate Xcode project
+        env:
+          STORE_URL: ${{ inputs.store_url || 'https://salla.sa' }}
+          APP_NAME: ${{ inputs.app_name || 'متجري' }}
+          PACKAGE_NAME: ${{ inputs.package_name || 'sa.tatbiqi.test' }}
+          PRIMARY_COLOR: ${{ inputs.primary_color || '0F766E' }}
+          LOGO_URL: ${{ inputs.logo_url }}
+          WHATSAPP: ${{ inputs.whatsapp_number || '966500000000' }}
+        run: |
+          python3 builder/build_ios.py \
+            --store-url "$STORE_URL" --app-name "$APP_NAME" --package-name "$PACKAGE_NAME" \
+            --primary-color "$PRIMARY_COLOR" --logo-url "$LOGO_URL" --whatsapp "$WHATSAPP" \
+            --version-code "$VERSION_CODE" --out out/ios --result-json out/result.json
+          cd out/ios && xcodegen generate
+
+      - name: Build for iPhone (unsigned)
+        run: |
+          cd out/ios
+          xcodebuild -project Tatbiqi.xcodeproj -target App -configuration Release \
+            -sdk iphoneos CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO build \
+            | tee ../device.log | grep -E "error:|warning:|BUILD" || true
+          test "${PIPESTATUS[0]}" -eq 0
+
+      - name: Build for the simulator
+        run: |
+          cd out/ios
+          xcodebuild -project Tatbiqi.xcodeproj -target App -configuration Release \
+            -sdk iphonesimulator CODE_SIGNING_ALLOWED=NO SYMROOT="$PWD/../sim" build \
+            | grep -E "error:|BUILD" || true
+          test "${PIPESTATUS[0]}" -eq 0
+          cd ../sim/Release-iphonesimulator && zip -qry ../../app-simulator.zip App.app
+
+      - name: Smoke test in the simulator
+        run: |
+          UDID=$(xcrun simctl list devices available -j | python3 -c '
+          import json,sys
+          d=json.load(sys.stdin)["devices"]
+          print(next(x["udid"] for k,v in d.items() if "iOS" in k for x in v if x["name"].startswith("iPhone")))')
+          xcrun simctl boot "$UDID"
+          xcrun simctl install "$UDID" out/sim/Release-iphonesimulator/App.app
+          BID=$(python3 -c 'import json;print(json.load(open("out/result.json"))["bundleId"])')
+          xcrun simctl launch "$UDID" "$BID"
+          sleep 25
+          xcrun simctl io "$UDID" screenshot out/screenshot.png
+          # still running = no crash on launch
+          xcrun simctl spawn "$UDID" launchctl list | grep -q "$BID"
+
+      - name: Keep builds (7 days)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-${{ env.ORDER_NUMBER }}
+          path: |
+            out/app-simulator.zip
+            out/screenshot.png
+            out/ios/project.yml
+          retention-days: 7
+
+      - name: Publish test screenshot (TEMP)
+        if: always() && github.event_name == 'push'
+        run: |
+          [ -f out/screenshot.png ] || exit 0
+          git config user.name "tatbiqi-ci"; git config user.email "ci@tatbiqi.invalid"
+          git checkout --orphan ci-screens
+          git rm -rq --cached .
+          git add -f out/screenshot.png out/device.log 2>/dev/null || git add -f out/screenshot.png
+          git commit -qm "iOS test screenshot ${GITHUB_SHA::7}"
+          git push -f origin ci-screens
