@@ -7,8 +7,6 @@ run-name: "iOS ${{ inputs.order_number || 'TEST-IOS' }}"
 # added once a client's account exists.
 
 on:
-  push:  # TEMP: lets the branch test itself before the workflow exists on main
-    branches: [ios-builder]
   workflow_dispatch:
     inputs:
       store_url:
@@ -41,7 +39,7 @@ on:
         default: '1'
 
 permissions:
-  contents: write  # TEMP: pushes the test screenshot to the ci-screens branch
+  contents: read
 
 jobs:
   build:
@@ -126,13 +124,3 @@ jobs:
             out/ios/project.yml
           retention-days: 7
 
-      - name: Publish test screenshot (TEMP)
-        if: always() && github.event_name == 'push'
-        run: |
-          [ -f out/screenshot.png ] || exit 0
-          git config user.name "tatbiqi-ci"; git config user.email "ci@tatbiqi.invalid"
-          git checkout --orphan ci-screens
-          git rm -rq --cached .
-          git add -f out/screenshot.png out/device.log 2>/dev/null || git add -f out/screenshot.png
-          git commit -qm "iOS test screenshot ${GITHUB_SHA::7}"
-          git push -f origin ci-screens
