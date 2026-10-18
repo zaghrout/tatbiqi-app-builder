@@ -68,3 +68,17 @@ python3 builder/build_apk.py --store-url https://mystore.salla.sa --app-name "م
 
 Turn off Play Protect scanning and allow "Install unknown apps" for the browser or file
 manager used to open the APK.
+
+## iOS
+
+`builder/build_ios.py` writes an Xcode project for one store (shared Swift sources in
+`builder/ios/Sources`, plus the store's `tatbiqi.json`, app icon and launch color), and
+`.github/workflows/build-ios.yml` builds it with XcodeGen + xcodebuild on a macOS runner.
+The app is a full-screen `WKWebView` with the same rules as the Android shell (store and
+payment pages stay in the app, WhatsApp and other links open outside, WhatsApp button
+injected on store pages), plus pull to refresh, swipe back and an offline screen.
+
+Today the workflow builds unsigned for iPhone and for the simulator, then launches the app
+in a simulator as a smoke test. Signing and App Store upload come with the first client's
+Apple Developer account (Team ID + App Store Connect API key). The bundle id is the Android
+package name with `_` replaced by `-`.
