@@ -134,7 +134,8 @@ def run(cmd, secret=None):
     if r.returncode != 0:
         err = r.stderr if not secret else r.stderr.replace(secret, "***")
         print(err, file=sys.stderr)
-        raise BuildError(f"step failed: {Path(str(cmd[0])).name}")
+        tail = " | ".join((err or r.stdout).strip().splitlines()[-6:])[:900]
+        raise BuildError(f"step failed: {Path(str(cmd[-1] if cmd[0] == 'java' else cmd[0])).name} {tail}")
     return r
 
 
@@ -414,6 +415,8 @@ def main():
         build(args)
     except BuildError as e:
         print(f"❌ {e}", file=sys.stderr)
+        if os.environ.get("GITHUB_ACTIONS"):
+            print(f"::error::{e}")  # shows on the run page
         sys.exit(1)
 
 
