@@ -7,7 +7,7 @@ The body is signed with HMAC-SHA256 using BUILD_CALLBACK_SECRET, sent as
 
 Usage:
   python3 builder/callback.py --status building|ready|failed \
-      [--result-json result.json] [--apk-key apks/ORD/1.apk] [--error "..."]
+      [--result-json result.json] [--apk-key apks/ORD/1.apk] [--aab-key aabs/ORD/1.aab] [--error "..."]
 
 Environment:
   CALLBACK_URL, BUILD_CALLBACK_SECRET, BUILD_ID, ORDER_NUMBER, RUN_URL
@@ -28,6 +28,7 @@ def main():
     p.add_argument("--status", required=True, choices=["building", "ready", "failed"])
     p.add_argument("--result-json", default="")
     p.add_argument("--apk-key", default="")
+    p.add_argument("--aab-key", default="")
     p.add_argument("--error", default="")
     args = p.parse_args()
 
@@ -52,9 +53,12 @@ def main():
             "packageName": r.get("package"),
             "versionCode": r.get("versionCode"),
             "versionName": r.get("versionName"),
+            "aabSize": r.get("aabSize"),
         })
     if args.apk_key:
         body["apkKey"] = args.apk_key
+    if args.aab_key:
+        body["aabKey"] = args.aab_key
     if args.error:
         body["error"] = args.error[:500]
 

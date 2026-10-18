@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """
-Tatbiqi APK builder (v3).
+Tatbiqi app builder (v4).
 
-Builds a signed WebView APK for one store with aapt2 + d8 + apksigner, no Gradle.
+Builds a signed WebView APK for one store with aapt2 + d8 + apksigner, no Gradle,
+and with --aab-output also a signed Android App Bundle (AAB) for Google Play,
+packaged with bundletool and signed with jarsigner using the same key.
 Runs on GitHub Actions (see .github/workflows/build-apk.yml) or locally.
 
 Per-store values never go into Java source. They are written to
@@ -13,12 +15,14 @@ Usage:
       --store-url https://mystore.salla.sa --app-name "متجري" \
       --package-name sa.tatbiqi.mystore --primary-color 0F766E \
       --whatsapp 966555555555 --logo-url https://.../logo.png \
-      --version-code 1 --version-name 1.0.0 --output out/app.apk
+      --version-code 1 --version-name 1.0.0 --output out/app.apk \
+      --aab-output out/app.aab
 
 Environment:
   ANDROID_HOME          Android SDK root (required)
-  BUILD_TOOLS_VERSION   default 34.0.0
-  ANDROID_PLATFORM      default android-34
+  BUILD_TOOLS_VERSION   default 36.0.0
+  ANDROID_PLATFORM      default android-36
+  BUNDLETOOL_JAR        path to bundletool-all.jar (required with --aab-output)
   KEYSTORE_PATH, KEYSTORE_PASSWORD, KEY_ALIAS, KEY_PASSWORD
                         signing key. If KEYSTORE_PATH is unset and
                         --throwaway-key is passed, a temporary key is generated
@@ -34,12 +38,15 @@ import subprocess
 import sys
 import tempfile
 import urllib.request
+import zipfile
 from pathlib import Path
 from xml.sax.saxutils import escape as xml_escape
 
 HERE = Path(__file__).resolve().parent
 TEMPLATE_JAVA = HERE / "template" / "MainActivity.java"
 JAVA_PACKAGE = "com.tatbiqi.app"  # code package; the app id is --package-name
+MIN_SDK = "23"
+TARGET_SDK = "36"  # Android 16, required by Google Play for new apps and updates
 
 MAX_LOGO_BYTES = 5 * 1024 * 1024
 ICON_SIZES = [
@@ -108,8 +115,8 @@ def sdk_paths():
     home = os.environ.get("ANDROID_HOME") or os.environ.get("ANDROID_SDK_ROOT")
     if not home:
         raise BuildError("ANDROID_HOME is not set")
-    bt = Path(home) / "build-tools" / os.environ.get("BUILD_TOOLS_VERSION", "34.0.0")
-    platform = Path(home) / "platforms" / os.environ.get("ANDROID_PLATFORM", "android-34") / "android.jar"
+    bt = Path(home) / "build-tools" / os.environ.get("BUILD_TOOLS_VERSION", "36.0.0")
+    platform = Path(home) / "platforms" / os.environ.get("ANDROID_PLATFORM", "android-36") / "android.jar"
     for p in (bt / "aapt2", bt / "d8", bt / "zipalign", bt / "apksigner", platform):
         if not p.exists():
             raise BuildError(f"missing SDK file: {p}")
@@ -147,7 +154,8 @@ def write_manifest(work, cfg):
         android:supportsRtl="true"
         android:usesCleartextTraffic="false"
         android:theme="@android:style/Theme.DeviceDefault.Light.NoActionBar"
-        android:hardwareAccelerated="true">
+        android:hardwareAccelerated="true"
+        android:enableOnBackInvokedCallback="true">
         <activity
             android:name="{JAVA_PACKAGE}.MainActivity"
             android:exported="true"
@@ -250,7 +258,51 @@ def signing_key(work, throwaway):
     return str(ks), pw, "test", pw
 
 
+# ---------------------------------------------------------------- bundle
+
+def build_aab(work, bt, platform, cfg, args, aab_out, key):
+    """Proto-format link -> base module zip -> bundletool -> jarsigner."""
+    jar = os.environ.get("BUNDLETOOL_JAR")
+    if not jar or not Path(jar).exists():
+        raise BuildError("BUNDLETOOL_JAR is not set or missing")
+
+    print("\n🧩 aapt2 (proto)", flush=True)
+    run([bt / "aapt2", "link", "--proto-format"] + link_args(work, platform, cfg, args)
+        + ["-o", work / "proto.apk", work / "res.zip"])
+
+    # bundletool wants the manifest under manifest/ and the dex under dex/.
+    base = work / "base.zip"
+    with zipfile.ZipFile(work / "proto.apk") as src, \
+            zipfile.ZipFile(base, "w", zipfile.ZIP_DEFLATED) as dst:
+        for item in src.infolist():
+            name = "manifest/AndroidManifest.xml" if item.filename == "AndroidManifest.xml" else item.filename
+            dst.writestr(name, src.read(item))
+        dst.write(work / "dex" / "classes.dex", "dex/classes.dex")
+
+    print("\n📚 bundletool", flush=True)
+    aab_out.unlink(missing_ok=True)
+    run(["java", "-jar", jar, "build-bundle", f"--modules={base}", f"--output={aab_out}"])
+    run(["java", "-jar", jar, "validate", f"--bundle={aab_out}"])
+
+    print("\n🔑 jarsigner", flush=True)
+    ks, _, alias, _ = key
+    run(["jarsigner", "-keystore", ks,
+         "-storepass:env", "TATBIQI_KS_PASS", "-keypass:env", "TATBIQI_KEY_PASS",
+         "-sigalg", "SHA256withRSA", "-digestalg", "SHA-256", aab_out, alias])
+    run(["jarsigner", "-verify", aab_out])
+
+
 # ---------------------------------------------------------------- build
+
+def link_args(work, platform, cfg, args):
+    return ["--manifest", work / "AndroidManifest.xml",
+            "-I", platform,
+            "--rename-manifest-package", cfg["package"],
+            "--min-sdk-version", MIN_SDK, "--target-sdk-version", TARGET_SDK,
+            "--version-code", str(args.version_code),
+            "--version-name", args.version_name,
+            "-A", work / "assets"]
+
 
 def build(args):
     cfg = validate(args)
@@ -266,7 +318,7 @@ def build(args):
         (work / "dex").mkdir()
 
         write_manifest(work, cfg)
-        assets = write_assets(work, cfg)
+        write_assets(work, cfg)
 
         icon_source = "default"
         if cfg["logo_url"]:
@@ -285,26 +337,20 @@ def build(args):
         classes = [str(p) for p in (work / "classes").rglob("*.class")]
 
         print("\n📦 d8", flush=True)
-        run([bt / "d8", "--release", "--min-api", "23", "--lib", platform,
+        run([bt / "d8", "--release", "--min-api", MIN_SDK, "--lib", platform,
              "--output", work / "dex"] + classes)
 
         print("\n🎨 aapt2", flush=True)
         run([bt / "aapt2", "compile", "--dir", res, "-o", work / "res.zip"])
-        run([bt / "aapt2", "link",
-             "--manifest", work / "AndroidManifest.xml",
-             "-I", platform,
-             "--rename-manifest-package", cfg["package"],
-             "--min-sdk-version", "23", "--target-sdk-version", "34",
-             "--version-code", str(args.version_code),
-             "--version-name", args.version_name,
-             "-A", assets,
-             "-o", work / "unsigned.apk", work / "res.zip"])
+        run([bt / "aapt2", "link"] + link_args(work, platform, cfg, args)
+            + ["-o", work / "unsigned.apk", work / "res.zip"])
 
         run(["zip", "-j", "-q", work / "unsigned.apk", work / "dex" / "classes.dex"])
         run([bt / "zipalign", "-f", "-p", "4", work / "unsigned.apk", work / "aligned.apk"])
 
         print("\n🔑 apksigner", flush=True)
-        ks, ks_pw, alias, key_pw = signing_key(work, args.throwaway_key)
+        key = signing_key(work, args.throwaway_key)
+        ks, ks_pw, alias, key_pw = key
         env_ks = {"TATBIQI_KS_PASS": ks_pw, "TATBIQI_KEY_PASS": key_pw}
         os.environ.update(env_ks)
         run([bt / "apksigner", "sign", "--ks", ks, "--ks-key-alias", alias,
@@ -314,6 +360,11 @@ def build(args):
              "--out", out, work / "aligned.apk"])
         run([bt / "apksigner", "verify", out])
 
+        aab = Path(args.aab_output).resolve() if args.aab_output else None
+        if aab:
+            aab.parent.mkdir(parents=True, exist_ok=True)
+            build_aab(work, bt, platform, cfg, args, aab, key)
+
         result = {
             "apk": str(out),
             "size": out.stat().st_size,
@@ -322,6 +373,8 @@ def build(args):
             "versionName": args.version_name,
             "icon": icon_source,
         }
+        if aab:
+            result.update({"aab": str(aab), "aabSize": aab.stat().st_size})
         print(f"\n🎉 {json.dumps(result, ensure_ascii=False)}")
         if args.result_json:
             Path(args.result_json).write_text(json.dumps(result), encoding="utf-8")
@@ -342,6 +395,7 @@ def main():
     p.add_argument("--version-code", type=int, default=1)
     p.add_argument("--version-name", default="1.0.0")
     p.add_argument("--output", required=True)
+    p.add_argument("--aab-output", default="", help="also build a signed .aab for Google Play")
     p.add_argument("--result-json", default="")
     p.add_argument("--throwaway-key", action="store_true",
                    help="sign with a temporary key when KEYSTORE_PATH is unset (local tests only)")

@@ -1,9 +1,10 @@
-name: Build Android APK
+name: Build Android app
 run-name: "Build ${{ github.event.client_payload.order_number || inputs.order_number }}"
 
 # Triggered by the dashboard (repository_dispatch) or by hand for testing.
-# Builds with aapt2 + d8 + apksigner (no Gradle), uploads the APK to R2,
-# then reports back to the dashboard with a signed callback.
+# Builds with aapt2 + d8 + apksigner (no Gradle): an APK for direct installs and an
+# AAB for Google Play, both signed with the same key. Uploads both to R2, then
+# reports back to the dashboard with a signed callback.
 #
 # Repository secrets:
 #   KEYSTORE_BASE64, KEYSTORE_PASSWORD, KEY_ALIAS, KEY_PASSWORD
@@ -88,12 +89,22 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Android SDK (platform 34 + build-tools 34)
+      - name: Android SDK (platform 36 + build-tools 36)
         run: |
           SDKM="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
           yes | "$SDKM" --licenses > /dev/null || true
-          "$SDKM" --install "platforms;android-34" "build-tools;34.0.0" > /dev/null
-          ls "$ANDROID_HOME/build-tools/34.0.0/aapt2" "$ANDROID_HOME/platforms/android-34/android.jar"
+          "$SDKM" --install "platforms;android-36" "build-tools;36.0.0" > /dev/null
+          ls "$ANDROID_HOME/build-tools/36.0.0/aapt2" "$ANDROID_HOME/platforms/android-36/android.jar"
+
+      - name: bundletool
+        env:
+          BUNDLETOOL_VERSION: 1.18.1
+        run: |
+          JAR="$RUNNER_TEMP/bundletool.jar"
+          curl -fsSL -o "$JAR" \
+            "https://github.com/google/bundletool/releases/download/${BUNDLETOOL_VERSION}/bundletool-all-${BUNDLETOOL_VERSION}.jar"
+          java -jar "$JAR" version
+          echo "BUNDLETOOL_JAR=$JAR" >> "$GITHUB_ENV"
 
       - name: Python deps
         run: python3 -m pip install --quiet pillow
@@ -106,7 +117,7 @@ jobs:
           echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.keystore"
           echo "KEYSTORE_PATH=$RUNNER_TEMP/release.keystore" >> "$GITHUB_ENV"
 
-      - name: Build APK
+      - name: Build APK + AAB
         env:
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
@@ -123,6 +134,7 @@ jobs:
             --version-code "$VERSION_CODE" \
             --version-name "$VERSION_NAME" \
             --output "out/app.apk" \
+            --aab-output "out/app.aab" \
             --result-json "out/result.json"
 
       - name: Upload to R2
@@ -141,16 +153,26 @@ jobs:
             --content-type application/vnd.android.package-archive \
             --no-progress
           echo "APK_KEY=$KEY" >> "$GITHUB_ENV"
+          KEY="aabs/${ORDER_NUMBER}/${VERSION_CODE}.aab"
+          aws s3 cp out/app.aab "s3://${R2_BUCKET}/${KEY}" \
+            --endpoint-url "https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com" \
+            --content-type application/octet-stream \
+            --no-progress
+          echo "AAB_KEY=$KEY" >> "$GITHUB_ENV"
 
-      - name: Keep APK as artifact (7 days)
+      - name: Keep APK + AAB as artifact (7 days)
         uses: actions/upload-artifact@v4
         with:
-          name: apk-${{ env.ORDER_NUMBER }}
-          path: out/app.apk
+          name: app-${{ env.ORDER_NUMBER }}
+          path: |
+            out/app.apk
+            out/app.aab
           retention-days: 7
 
       - name: Report ready
-        run: python3 builder/callback.py --status ready --result-json out/result.json --apk-key "$APK_KEY"
+        run: |
+          python3 builder/callback.py --status ready --result-json out/result.json \
+            --apk-key "$APK_KEY" --aab-key "$AAB_KEY"
 
       - name: Report failure
         if: failure()
