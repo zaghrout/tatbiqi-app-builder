@@ -4,9 +4,14 @@ import android.app.Activity;
 import android.content.ActivityNotFoundException;
 import android.content.Intent;
 import android.graphics.Color;
+import android.graphics.Insets;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
+import android.view.View;
 import android.view.Window;
+import android.view.WindowInsets;
+import android.view.WindowInsetsController;
 import android.view.WindowManager;
 import android.webkit.CookieManager;
 import android.webkit.JavascriptInterface;
@@ -14,6 +19,9 @@ import android.webkit.WebResourceRequest;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
+import android.widget.FrameLayout;
+import android.window.OnBackInvokedCallback;
+import android.window.OnBackInvokedDispatcher;
 
 import org.json.JSONObject;
 
@@ -30,6 +38,11 @@ import java.io.InputStream;
  * Rules learned on Realme/Xiaomi (see LESSONS-LEARNED.md):
  *  - The WebView is the only view. No native buttons or overlays on top of it.
  *  - The WhatsApp button is injected into the page with JavaScript.
+ *
+ * Targets Android 16 (API 36), which Google Play requires. On Android 15+ the app
+ * is always drawn edge to edge, so the WebView is padded by the system bar insets
+ * and the store color shows behind the bars. On Android 13+ back is handled with
+ * OnBackInvokedCallback, because onBackPressed is no longer called at API 36.
  */
 public class MainActivity extends Activity {
 
@@ -39,21 +52,27 @@ public class MainActivity extends Activity {
     private String primaryColor = "#0F766E";
     private String whatsappNumber = "";
     private String whatsappMessage = "";
+    private OnBackInvokedCallback backCallback;
+    private boolean backCallbackRegistered = false;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         loadConfig();
 
+        int barColor = Color.parseColor("#0F766E");
         try {
-            Window window = getWindow();
-            window.addFlags(WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS);
-            window.setStatusBarColor(Color.parseColor(primaryColor));
+            barColor = Color.parseColor(primaryColor);
         } catch (Exception ignored) {
         }
 
+        FrameLayout root = new FrameLayout(this);
+        root.setBackgroundColor(barColor);
         webView = new WebView(this);
-        setContentView(webView);
+        root.addView(webView, new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+        setContentView(root);
+        setUpSystemBars(root, barColor);
 
         WebSettings s = webView.getSettings();
         s.setJavaScriptEnabled(true);
@@ -91,6 +110,12 @@ public class MainActivity extends Activity {
                 super.onPageFinished(view, url);
                 injectWhatsAppButton(view, url);
             }
+
+            @Override
+            public void doUpdateVisitedHistory(WebView view, String url, boolean isReload) {
+                super.doUpdateVisitedHistory(view, url, isReload);
+                updateBackCallback();
+            }
         });
 
         if (savedInstanceState != null) {
@@ -98,6 +123,76 @@ public class MainActivity extends Activity {
         } else {
             webView.loadUrl(storeUrl);
         }
+    }
+
+    /** Store color behind the status bar, with icons that stay readable on it. */
+    private void setUpSystemBars(View root, int barColor) {
+        boolean lightBar = luminance(barColor) > 0.6;
+        Window window = getWindow();
+        try {
+            if (Build.VERSION.SDK_INT >= 35) {
+                // Edge to edge is forced: keep the page clear of the bars and the keyboard.
+                root.setOnApplyWindowInsetsListener(new View.OnApplyWindowInsetsListener() {
+                    @Override
+                    public WindowInsets onApplyWindowInsets(View v, WindowInsets insets) {
+                        Insets bars = insets.getInsets(
+                                WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout());
+                        Insets ime = insets.getInsets(WindowInsets.Type.ime());
+                        v.setPadding(bars.left, bars.top, bars.right, Math.max(bars.bottom, ime.bottom));
+                        return WindowInsets.CONSUMED;
+                    }
+                });
+            } else {
+                window.addFlags(WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS);
+                window.setStatusBarColor(barColor);
+            }
+            if (Build.VERSION.SDK_INT >= 30) {
+                int mask = WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS;
+                if (Build.VERSION.SDK_INT >= 35) {
+                    mask |= WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS;
+                }
+                window.getInsetsController().setSystemBarsAppearance(lightBar ? mask : 0, mask);
+            }
+        } catch (Exception ignored) {
+        }
+    }
+
+    private static double luminance(int color) {
+        return (0.299 * Color.red(color) + 0.587 * Color.green(color) + 0.114 * Color.blue(color)) / 255.0;
+    }
+
+    /**
+     * Android 13+: back goes to the previous store page while there is one.
+     * The callback is only registered then, so the system back-to-home animation
+     * still plays on the first page.
+     */
+    private void updateBackCallback() {
+        if (Build.VERSION.SDK_INT < 33 || webView == null) {
+            return;
+        }
+        boolean want = webView.canGoBack();
+        if (want == backCallbackRegistered) {
+            return;
+        }
+        OnBackInvokedDispatcher dispatcher = getOnBackInvokedDispatcher();
+        if (backCallback == null) {
+            backCallback = new OnBackInvokedCallback() {
+                @Override
+                public void onBackInvoked() {
+                    if (webView != null && webView.canGoBack()) {
+                        webView.goBack();
+                    } else {
+                        finish();
+                    }
+                }
+            };
+        }
+        if (want) {
+            dispatcher.registerOnBackInvokedCallback(OnBackInvokedDispatcher.PRIORITY_DEFAULT, backCallback);
+        } else {
+            dispatcher.unregisterOnBackInvokedCallback(backCallback);
+        }
+        backCallbackRegistered = want;
     }
 
     /** Reads assets/tatbiqi.json. Falls back to defaults if anything is off. */
@@ -227,7 +322,9 @@ public class MainActivity extends Activity {
         }
     }
 
+    /** Android 12 and older. */
     @Override
+    @SuppressWarnings("deprecation")
     public void onBackPressed() {
         if (webView != null && webView.canGoBack()) {
             webView.goBack();
