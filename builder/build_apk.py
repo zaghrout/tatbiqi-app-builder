@@ -291,6 +291,16 @@ def build_aab(work, bt, platform, cfg, args, aab_out, key):
          "-sigalg", "SHA256withRSA", "-digestalg", "SHA-256", aab_out, alias])
     run(["jarsigner", "-verify", aab_out])
 
+    # Same path Google Play takes: the bundle must turn into installable APKs.
+    manifest = run(["java", "-jar", jar, "dump", "manifest", f"--bundle={aab_out}"]).stdout
+    if f'android:targetSdkVersion="{TARGET_SDK}"' not in manifest or cfg["package"] not in manifest:
+        raise BuildError("bundle manifest is missing the package name or target SDK")
+    ks, ks_pw, alias, key_pw = key
+    run(["java", "-jar", jar, "build-apks", "--mode=universal",
+         f"--bundle={aab_out}", f"--output={work / 'check.apks'}",
+         f"--ks={ks}", f"--ks-key-alias={alias}",
+         "--ks-pass=env:TATBIQI_KS_PASS", "--key-pass=env:TATBIQI_KEY_PASS"])
+
 
 # ---------------------------------------------------------------- build
 

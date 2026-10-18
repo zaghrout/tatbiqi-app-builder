@@ -37,6 +37,9 @@ def main():
     if not url or not secret:
         print("⚠️  CALLBACK_URL or BUILD_CALLBACK_SECRET not set; skipping callback")
         return
+    if not os.environ.get("BUILD_ID"):
+        print("ℹ️  no BUILD_ID (manual test run); skipping callback")
+        return
 
     body = {
         "buildId": os.environ.get("BUILD_ID", ""),
