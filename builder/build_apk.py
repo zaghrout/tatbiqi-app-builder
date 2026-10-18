@@ -297,10 +297,13 @@ def build_aab(work, bt, platform, cfg, args, aab_out, key):
     if f'android:targetSdkVersion="{TARGET_SDK}"' not in manifest or cfg["package"] not in manifest:
         raise BuildError("bundle manifest is missing the package name or target SDK")
     ks, ks_pw, alias, key_pw = key
+    # bundletool takes passwords as pass: or file:, not env:. The work dir is deleted after the build.
+    (work / "ks.pass").write_text(ks_pw)
+    (work / "key.pass").write_text(key_pw)
     run(["java", "-jar", jar, "build-apks", "--mode=universal",
          f"--bundle={aab_out}", f"--output={work / 'check.apks'}",
          f"--ks={ks}", f"--ks-key-alias={alias}",
-         "--ks-pass=env:TATBIQI_KS_PASS", "--key-pass=env:TATBIQI_KEY_PASS"])
+         f"--ks-pass=file:{work / 'ks.pass'}", f"--key-pass=file:{work / 'key.pass'}"])
 
 
 # ---------------------------------------------------------------- build
