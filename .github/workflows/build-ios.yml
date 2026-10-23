@@ -132,7 +132,7 @@ jobs:
           xcrun simctl spawn "$UDID" launchctl list | grep -q "$BID"
           # Small copies in the log, readable without downloading the artifact.
           for f in screenshot-start screenshot; do
-            sips -Z 640 -s format jpeg -s formatOptions 55 "out/$f.png" --out "out/$f-small.jpg" > /dev/null
+            sips -Z 400 -s format jpeg -s formatOptions 40 "out/$f.png" --out "out/$f-small.jpg" > /dev/null
             echo "----- $f.jpg base64 -----"; base64 -i "out/$f-small.jpg" | tr -d '\n'; echo
             echo "----- end -----"
           done
