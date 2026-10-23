@@ -6,14 +6,26 @@ import WebKit
 /// Mirrors the Android shell (builder/template/MainActivity.java):
 ///  - store pages and checkout/payment pages stay inside the app;
 ///  - WhatsApp links and other schemes (tel:, mailto:) open the matching app;
-///  - the WhatsApp button is injected into the store's own pages with JavaScript.
+///  - the WhatsApp button is injected into the store's own pages with JavaScript;
+///  - add-ons changed on the dashboard (WhatsApp button, offers popup, colors) are read
+///    from the app's configUrl each time the app opens, so they need no rebuild;
+///  - the splash image covers the screen until the store's first page has loaded.
 /// Adds what iOS users expect: pull to refresh, swipe back, and an offline screen.
 final class StoreViewController: UIViewController, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler {
-    private let config: StoreConfig
+    private var config: StoreConfig
     private var webView: WKWebView!
+    private let contentController = WKUserContentController()
     private let progress = UIProgressView(progressViewStyle: .bar)
     private var progressObservation: NSKeyValueObservation?
     private let offlineView = OfflineView()
+    /// Behind the home indicator: the secondary color, or the primary one.
+    private let bottomBar = UIView()
+    private var splashView: UIView?
+    private var offer: [String: Any]?
+    /// The popup shows once per launch.
+    private var offerShown = false
+    private var firstPageLoaded = false
+    private static let remoteConfigKey = "remoteConfig"
 
     init(config: StoreConfig) {
         self.config = config
@@ -30,16 +42,14 @@ final class StoreViewController: UIViewController, WKNavigationDelegate, WKUIDel
         super.viewDidLoad()
         // Store color behind the status bar; the page starts below it.
         view.backgroundColor = config.primaryColor
-
-        let contentController = WKUserContentController()
-        if !config.whatsappNumber.isEmpty {
-            contentController.addUserScript(WKUserScript(
-                source: whatsappButtonScript(),
-                injectionTime: .atDocumentEnd,
-                forMainFrameOnly: true
-            ))
-            contentController.add(WeakScriptHandler(self), name: "tatbiqi")
+        // Last add-ons read from the dashboard, until this launch reads them again.
+        if let data = UserDefaults.standard.data(forKey: StoreViewController.remoteConfigKey),
+           let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
+            applyRemoteConfig(json)
         }
+
+        contentController.add(WeakScriptHandler(self), name: "tatbiqi")
+        installWhatsAppScript()
 
         let wkConfig = WKWebViewConfiguration()
         wkConfig.userContentController = contentController
@@ -68,7 +78,9 @@ final class StoreViewController: UIViewController, WKNavigationDelegate, WKUIDel
         offlineView.isHidden = true
         offlineView.onRetry = { [weak self] in self?.retry() }
 
-        for v in [webView!, progress, offlineView] as [UIView] {
+        bottomBar.backgroundColor = config.secondaryColor ?? config.primaryColor
+
+        for v in [webView!, bottomBar, progress, offlineView] as [UIView] {
             v.translatesAutoresizingMaskIntoConstraints = false
             view.addSubview(v)
         }
@@ -77,7 +89,11 @@ final class StoreViewController: UIViewController, WKNavigationDelegate, WKUIDel
             webView.topAnchor.constraint(equalTo: safe.topAnchor),
             webView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             webView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            webView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            webView.bottomAnchor.constraint(equalTo: safe.bottomAnchor),
+            bottomBar.topAnchor.constraint(equalTo: safe.bottomAnchor),
+            bottomBar.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            bottomBar.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            bottomBar.bottomAnchor.constraint(equalTo: view.bottomAnchor),
             progress.topAnchor.constraint(equalTo: safe.topAnchor),
             progress.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             progress.trailingAnchor.constraint(equalTo: view.trailingAnchor),
@@ -87,7 +103,78 @@ final class StoreViewController: UIViewController, WKNavigationDelegate, WKUIDel
             offlineView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
         ])
 
-        webView.load(URLRequest(url: config.storeURL))
+        showSplash()
+
+        let start = NotificationChecker.pendingURL ?? config.storeURL
+        NotificationChecker.pendingURL = nil
+        webView.load(URLRequest(url: start))
+
+        NotificationCenter.default.addObserver(self, selector: #selector(openFromNotification(_:)),
+                                               name: NotificationChecker.openURL, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(fetchRemoteConfig),
+                                               name: UIApplication.willEnterForegroundNotification, object: nil)
+        fetchRemoteConfig()
+    }
+
+    @objc private func openFromNotification(_ note: Notification) {
+        guard let url = note.object as? URL, isViewLoaded else { return }
+        NotificationChecker.pendingURL = nil
+        offlineView.isHidden = true
+        webView.load(URLRequest(url: url))
+    }
+
+    // MARK: - Splash
+
+    private func showSplash() {
+        guard !config.splash.isEmpty,
+              let path = Bundle.main.path(forResource: config.splash, ofType: nil),
+              let image = UIImage(contentsOfFile: path)
+        else { return }
+        let splash = UIImageView(image: image)
+        splash.contentMode = .scaleAspectFill
+        splash.clipsToBounds = true
+        splash.backgroundColor = config.primaryColor
+        splash.frame = view.bounds
+        splash.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        view.addSubview(splash)
+        splashView = splash
+        // Never longer than 6 seconds, even if the store is slow.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 6) { [weak self] in self?.hideSplash() }
+    }
+
+    private func hideSplash() {
+        guard let splash = splashView else { return }
+        splashView = nil
+        UIView.animate(withDuration: 0.3, animations: { splash.alpha = 0 }) { _ in splash.removeFromSuperview() }
+    }
+
+    // MARK: - Add-ons from the dashboard
+
+    @objc private func fetchRemoteConfig() {
+        guard let url = config.configURL else { return }
+        var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 6)
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        URLSession.shared.dataTask(with: request) { [weak self] data, response, _ in
+            guard let data = data, (response as? HTTPURLResponse)?.statusCode == 200,
+                  let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+            else { return }
+            UserDefaults.standard.set(data, forKey: StoreViewController.remoteConfigKey)
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                self.applyRemoteConfig(json)
+                self.installWhatsAppScript()
+                self.refreshWhatsAppButton()
+                self.maybeShowOffer()
+            }
+        }.resume()
+    }
+
+    private func applyRemoteConfig(_ json: [String: Any]) {
+        config.apply(remote: json)
+        if let o = json["offer"] {
+            offer = o as? [String: Any]
+        }
+        bottomBar.backgroundColor = config.secondaryColor ?? config.primaryColor
     }
 
     @objc private func reload(_ sender: UIRefreshControl) {
@@ -141,6 +228,13 @@ final class StoreViewController: UIViewController, WKNavigationDelegate, WKUIDel
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         webView.scrollView.refreshControl?.endRefreshing()
         offlineView.isHidden = true
+        hideSplash()
+        if !firstPageLoaded {
+            firstPageLoaded = true
+            // Asked once, after the store is on screen, like Android 13+.
+            NotificationChecker.requestPermission()
+        }
+        maybeShowOffer()
     }
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
@@ -156,6 +250,7 @@ final class StoreViewController: UIViewController, WKNavigationDelegate, WKUIDel
         let code = (error as NSError).code
         // Cancelled loads (a new link tapped mid-load) are not failures.
         if code == NSURLErrorCancelled || code == 102 /* frame load interrupted */ { return }
+        hideSplash()
         offlineView.isHidden = false
     }
 
@@ -183,7 +278,7 @@ final class StoreViewController: UIViewController, WKNavigationDelegate, WKUIDel
     // MARK: - WhatsApp
 
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
-        guard message.name == "tatbiqi", (message.body as? String) == "whatsapp",
+        guard message.name == "tatbiqi", (message.body as? String) == "whatsapp", !config.whatsappNumber.isEmpty,
               config.isStoreHost(message.frameInfo.request.url?.host) || config.isStoreHost(webView.url?.host)
         else { return }
         var link = "https://wa.me/" + config.whatsappNumber
@@ -193,6 +288,72 @@ final class StoreViewController: UIViewController, WKNavigationDelegate, WKUIDel
         }
         if let url = URL(string: link) { openExternal(url) }
     }
+
+    /// Adds the button to every store page from now on (or to none, once it's turned off).
+    private func installWhatsAppScript() {
+        contentController.removeAllUserScripts()
+        guard !config.whatsappNumber.isEmpty else { return }
+        contentController.addUserScript(WKUserScript(
+            source: whatsappButtonScript(),
+            injectionTime: .atDocumentEnd,
+            forMainFrameOnly: true
+        ))
+    }
+
+    /// After the dashboard changes the WhatsApp button: drop the old one and add the new one.
+    private func refreshWhatsAppButton() {
+        guard webView != nil else { return }
+        var js = "(function(){var b=document.getElementById('tatbiqi-wa');if(b)b.remove();})();"
+        if !config.whatsappNumber.isEmpty { js += whatsappButtonScript() }
+        webView.evaluateJavaScript(js, completionHandler: nil)
+    }
+
+    // MARK: - Offers popup
+
+    /// Shows the offers popup once per launch, on a store page. Text is set with textContent, never as HTML.
+    private func maybeShowOffer() {
+        guard !offerShown, firstPageLoaded, let offer = offer,
+              !webView.isLoading, config.isStoreHost(webView.url?.host)
+        else { return }
+        let o: [String: String] = [
+            "title": offer["title"] as? String ?? "",
+            "text": offer["text"] as? String ?? "",
+            "image": offer["imageUrl"] as? String ?? "",
+            "link": offer["linkUrl"] as? String ?? "",
+            "button": offer["buttonText"] as? String ?? "",
+            "color": (config.accentColor ?? config.primaryColor).hexString,
+        ]
+        if o["title"]!.isEmpty && o["image"]!.isEmpty { return }
+        guard let data = try? JSONSerialization.data(withJSONObject: o),
+              let arg = String(data: data, encoding: .utf8)
+        else { return }
+        offerShown = true
+        webView.evaluateJavaScript(StoreViewController.offerScript + "(" + arg + ");", completionHandler: nil)
+    }
+
+    /// Same popup as the Android app (MainActivity.maybeShowOffer).
+    private static let offerScript = #"""
+    (function(o){
+      if(document.getElementById('tatbiqi-offer'))return;
+      var ov=document.createElement('div');ov.id='tatbiqi-offer';ov.dir='auto';
+      ov.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:2147483647;display:flex;align-items:center;justify-content:center;padding:24px;';
+      var c=document.createElement('div');
+      c.style.cssText='position:relative;background:#fff;color:#111;border-radius:18px;overflow:hidden;width:100%;max-width:360px;box-shadow:0 10px 40px rgba(0,0,0,.35);font-family:inherit;text-align:center;';
+      var x=document.createElement('div');x.textContent='×';x.setAttribute('role','button');x.setAttribute('aria-label','close');
+      x.style.cssText='position:absolute;top:8px;left:8px;width:32px;height:32px;border-radius:50%;background:rgba(0,0,0,.45);color:#fff;font-size:22px;line-height:32px;cursor:pointer;z-index:1;';
+      function close(){ov.remove();}
+      x.onclick=close;ov.onclick=function(e){if(e.target===ov)close();};c.appendChild(x);
+      if(/^https:\/\//.test(o.image)){var i=document.createElement('img');i.src=o.image;i.alt='';i.style.cssText='display:block;width:100%;max-height:50vh;object-fit:cover;';c.appendChild(i);}
+      var b=document.createElement('div');b.style.cssText='padding:18px 18px 20px;';
+      if(o.title){var t=document.createElement('div');t.textContent=o.title;t.style.cssText='font-size:19px;font-weight:700;margin-bottom:6px;';b.appendChild(t);}
+      if(o.text){var p=document.createElement('div');p.textContent=o.text;p.style.cssText='font-size:15px;line-height:1.6;color:#444;white-space:pre-wrap;';b.appendChild(p);}
+      if(/^https:\/\//.test(o.link)){var a=document.createElement('div');a.setAttribute('role','button');
+        a.textContent=o.button||'تسوّق الحين';
+        a.style.cssText='margin-top:14px;padding:12px;border-radius:12px;color:#fff;font-weight:700;font-size:16px;cursor:pointer;background:'+o.color+';';
+        a.onclick=function(){close();location.href=o.link;};b.appendChild(a);}
+      c.appendChild(b);ov.appendChild(c);(document.body||document.documentElement).appendChild(ov);
+    })
+    """#
 
     private func whatsappButtonScript() -> String {
         // The host check runs in the page so the button only shows on the store's own pages.
