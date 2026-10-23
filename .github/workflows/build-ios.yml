@@ -1,12 +1,18 @@
 name: Build iOS app
-run-name: "iOS ${{ inputs.order_number || 'TEST-IOS' }}"
+run-name: "iOS ${{ github.event.client_payload.order_number || inputs.order_number || 'TEST-IOS' }}"
 
+# Triggered by the dashboard (repository_dispatch build-ios, /api/build/ios) or by hand.
 # Generates the store's Xcode project (builder/build_ios.py + XcodeGen) and builds it
-# on a macOS runner. Without an Apple Developer account this proves the app compiles
-# for iPhone and gives a simulator build to try; signing and App Store upload are
-# added once a client's account exists.
+# on a macOS runner, for iPhone and for the simulator, then runs the app in an iPhone
+# simulator. The screenshot goes to R2 at ios/<order>/<build>/screenshot.png and the
+# dashboard shows it. Signing and the App Store upload are added once the store
+# owner's Apple Developer account is connected.
+#
+# Uses the same secrets as build-apk.yml (R2_*, BUILD_CALLBACK_SECRET).
 
 on:
+  repository_dispatch:
+    types: [build-ios]
   workflow_dispatch:
     inputs:
       store_url:
@@ -52,20 +58,34 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 30
     env:
-      ORDER_NUMBER: ${{ inputs.order_number || 'TEST-IOS' }}
-      VERSION_CODE: ${{ inputs.version_code || '1' }}
+      STORE_URL: ${{ github.event.client_payload.store_url || inputs.store_url || 'https://salla.sa' }}
+      APP_NAME: ${{ github.event.client_payload.app_name || inputs.app_name || 'متجري' }}
+      PACKAGE_NAME: ${{ github.event.client_payload.package_name || inputs.package_name || 'sa.tatbiqi.test' }}
+      PRIMARY_COLOR: ${{ github.event.client_payload.primary_color || inputs.primary_color || '0F766E' }}
+      LOGO_URL: ${{ github.event.client_payload.logo_url || inputs.logo_url }}
+      WHATSAPP: ${{ github.event.client_payload.whatsapp_number || inputs.whatsapp_number }}
+      WHATSAPP_MESSAGE: ${{ github.event.client_payload.whatsapp_message }}
+      SPLASH_URL: ${{ inputs.splash_url }}
+      ORDER_NUMBER: ${{ github.event.client_payload.order_number || inputs.order_number || 'TEST-IOS' }}
+      BUILD_ID: ${{ github.event.client_payload.build_id || inputs.build_id }}
+      VERSION_CODE: ${{ github.event.client_payload.version_code || inputs.version_code || '1' }}
+      CALLBACK_URL: ${{ vars.TATBIQI_CALLBACK_URL || 'https://app.tatbiqii.com/api/build/callback' }}
+      CONFIG_BASE_URL: ${{ vars.TATBIQI_CONFIG_BASE_URL || 'https://app.tatbiqii.com/api/app-config' }}
+      BUILD_CALLBACK_SECRET: ${{ secrets.BUILD_CALLBACK_SECRET }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Check inputs
-        env:
-          BUILD_ID: ${{ inputs.build_id }}
         run: |
           [[ "$ORDER_NUMBER" =~ ^[A-Za-z0-9_-]{1,64}$ ]] || { echo "bad order number"; exit 1; }
           [[ -z "$BUILD_ID" || "$BUILD_ID" =~ ^[A-Za-z0-9_-]{1,64}$ ]] || { echo "bad build id"; exit 1; }
           [[ "$VERSION_CODE" =~ ^[0-9]{1,10}$ ]] || { echo "bad version code"; exit 1; }
+
+      - name: Report building
+        run: python3 builder/callback.py --platform ios --status building --version-code "$VERSION_CODE" || true
 
       - name: Tools
         run: |
@@ -76,22 +96,13 @@ jobs:
           xcodebuild -version
 
       - name: Generate Xcode project
-        env:
-          STORE_URL: ${{ inputs.store_url || 'https://salla.sa' }}
-          APP_NAME: ${{ inputs.app_name || 'متجري' }}
-          PACKAGE_NAME: ${{ inputs.package_name || 'sa.tatbiqi.test' }}
-          PRIMARY_COLOR: ${{ inputs.primary_color || '0F766E' }}
-          LOGO_URL: ${{ inputs.logo_url }}
-          WHATSAPP: ${{ inputs.whatsapp_number || '966500000000' }}
-          BUILD_ID: ${{ inputs.build_id }}
-          SPLASH_URL: ${{ inputs.splash_url }}
-          CONFIG_BASE_URL: ${{ vars.TATBIQI_CONFIG_BASE_URL || 'https://app.tatbiqii.com/api/app-config' }}
         run: |
           CONFIG_URL=""
           [ -n "$BUILD_ID" ] && CONFIG_URL="$CONFIG_BASE_URL/$BUILD_ID"
           python3 builder/build_ios.py \
             --store-url "$STORE_URL" --app-name "$APP_NAME" --package-name "$PACKAGE_NAME" \
-            --primary-color "$PRIMARY_COLOR" --logo-url "$LOGO_URL" --whatsapp "$WHATSAPP" \
+            --primary-color "$PRIMARY_COLOR" --logo-url "$LOGO_URL" \
+            --whatsapp "$WHATSAPP" --whatsapp-message "$WHATSAPP_MESSAGE" \
             --config-url "$CONFIG_URL" --splash-url "$SPLASH_URL" \
             --version-code "$VERSION_CODE" --out out/ios --result-json out/result.json
           cat out/ios/Resources/tatbiqi.json; echo
@@ -123,19 +134,34 @@ jobs:
           xcrun simctl boot "$UDID"
           xcrun simctl install "$UDID" out/sim/Release-iphonesimulator/App.app
           BID=$(python3 -c 'import json;print(json.load(open("out/result.json"))["bundleId"])')
-          xcrun simctl launch "$UDID" "$BID"
-          sleep 4
-          xcrun simctl io "$UDID" screenshot out/screenshot-start.png
-          sleep 26
+          # -tatbiqiNoPrompt: no notification question over the store in the screenshot
+          xcrun simctl launch "$UDID" "$BID" -tatbiqiNoPrompt
+          sleep 30
           xcrun simctl io "$UDID" screenshot out/screenshot.png
           # still running = no crash on launch
           xcrun simctl spawn "$UDID" launchctl list | grep -q "$BID"
-          # Small copies in the log, readable without downloading the artifact.
-          for f in screenshot-start screenshot; do
-            sips -Z 400 -s format jpeg -s formatOptions 40 "out/$f.png" --out "out/$f-small.jpg" > /dev/null
-            echo "----- $f.jpg base64 -----"; base64 -i "out/$f-small.jpg" | tr -d '\n'; echo
-            echo "----- end -----"
-          done
+          # A small copy in the log, readable without downloading the artifact.
+          sips -Z 400 -s format jpeg -s formatOptions 40 out/screenshot.png --out out/screenshot-small.jpg > /dev/null
+          echo "----- screenshot.jpg base64 -----"; base64 -i out/screenshot-small.jpg | tr -d '\n'; echo
+          echo "----- end -----"
+
+      - name: Upload screenshot to R2
+        if: env.BUILD_ID != ''
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          AWS_REQUEST_CHECKSUM_CALCULATION: when_required
+          AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+        run: |
+          KEY="ios/${ORDER_NUMBER}/${VERSION_CODE}/screenshot.png"
+          aws s3 cp out/screenshot.png "s3://${R2_BUCKET}/${KEY}" \
+            --endpoint-url "https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com" \
+            --content-type image/png \
+            --no-progress
+          echo "SCREENSHOT_KEY=$KEY" >> "$GITHUB_ENV"
 
       - name: Keep builds (7 days)
         if: always()
@@ -144,7 +170,17 @@ jobs:
           name: ios-${{ env.ORDER_NUMBER }}
           path: |
             out/app-simulator.zip
-            out/screenshot*.png
+            out/screenshot.png
             out/ios/project.yml
           retention-days: 7
 
+      - name: Report ready
+        run: |
+          python3 builder/callback.py --platform ios --status ready \
+            --version-code "$VERSION_CODE" --screenshot-key "$SCREENSHOT_KEY"
+
+      - name: Report failure
+        if: failure()
+        run: |
+          python3 builder/callback.py --platform ios --status failed --version-code "$VERSION_CODE" \
+            --error "iOS build failed. See $RUN_URL" || true
