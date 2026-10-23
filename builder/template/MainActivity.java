@@ -3,11 +3,14 @@ package com.tatbiqi.app;
 import android.app.Activity;
 import android.content.ActivityNotFoundException;
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.graphics.Color;
 import android.graphics.Insets;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.view.View;
 import android.view.Window;
 import android.view.WindowInsets;
@@ -27,6 +30,8 @@ import org.json.JSONObject;
 
 import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
+import java.net.HttpURLConnection;
+import java.net.URL;
 
 /**
  * Tatbiqi store app shell.
@@ -34,6 +39,11 @@ import java.io.InputStream;
  * This file is identical for every store. All per-store values (URL, color,
  * WhatsApp) come from assets/tatbiqi.json, which build_apk.py writes. Keeping
  * store data out of the Java source means no user input is ever compiled as code.
+ *
+ * Add-ons the merchant changes on the dashboard (WhatsApp button, offers popup)
+ * are read at every launch from configUrl, so they apply without a new build.
+ * The last answer is kept, so they also work offline; until the first answer
+ * arrives the values from tatbiqi.json are used.
  *
  * Rules learned on Realme/Xiaomi (see LESSONS-LEARNED.md):
  *  - The WebView is the only view. No native buttons or overlays on top of it.
@@ -52,6 +62,12 @@ public class MainActivity extends Activity {
     private String primaryColor = "#0F766E";
     private String whatsappNumber = "";
     private String whatsappMessage = "";
+    private String configUrl = "";
+    /** Offers popup from the dashboard, or null when off. */
+    private JSONObject offer = null;
+    /** The popup shows once per launch. */
+    private boolean offerShown = false;
+    private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private OnBackInvokedCallback backCallback;
     private boolean backCallbackRegistered = false;
 
@@ -59,6 +75,10 @@ public class MainActivity extends Activity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         loadConfig();
+        if (savedInstanceState != null) {
+            offerShown = savedInstanceState.getBoolean("offerShown", false);
+        }
+        applyRemoteConfig(getSharedPreferences("tatbiqi", MODE_PRIVATE).getString("remoteConfig", null));
 
         int barColor = Color.parseColor("#0F766E");
         try {
@@ -89,9 +109,8 @@ public class MainActivity extends Activity {
         cm.setAcceptCookie(true);
         cm.setAcceptThirdPartyCookies(webView, true);
 
-        if (whatsappNumber.length() > 0) {
-            webView.addJavascriptInterface(new WhatsAppBridge(), "TatbiqiApp");
-        }
+        // Always added: the dashboard can turn the WhatsApp button on after install.
+        webView.addJavascriptInterface(new WhatsAppBridge(), "TatbiqiApp");
 
         webView.setWebViewClient(new WebViewClient() {
             @Override
@@ -109,6 +128,7 @@ public class MainActivity extends Activity {
             public void onPageFinished(WebView view, String url) {
                 super.onPageFinished(view, url);
                 injectWhatsAppButton(view, url);
+                maybeShowOffer(view, url);
             }
 
             @Override
@@ -123,6 +143,7 @@ public class MainActivity extends Activity {
         } else {
             webView.loadUrl(storeUrl);
         }
+        fetchRemoteConfig();
     }
 
     /** Store color behind the status bar, with icons that stay readable on it. */
@@ -211,12 +232,151 @@ public class MainActivity extends Activity {
             primaryColor = cfg.optString("primaryColor", primaryColor);
             whatsappNumber = cfg.optString("whatsappNumber", "");
             whatsappMessage = cfg.optString("whatsappMessage", "");
+            configUrl = cfg.optString("configUrl", "");
         } catch (Exception ignored) {
         }
         try {
             String host = Uri.parse(storeUrl).getHost();
             storeHost = host == null ? "" : host;
         } catch (Exception ignored) {
+        }
+    }
+
+    /** Reads the dashboard's add-ons in the background, keeps them, and applies them. */
+    private void fetchRemoteConfig() {
+        if (!configUrl.startsWith("https://")) {
+            return;
+        }
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                HttpURLConnection c = null;
+                try {
+                    c = (HttpURLConnection) new URL(configUrl).openConnection();
+                    c.setConnectTimeout(6000);
+                    c.setReadTimeout(6000);
+                    c.setRequestProperty("Accept", "application/json");
+                    if (c.getResponseCode() != 200) {
+                        return;
+                    }
+                    InputStream in = c.getInputStream();
+                    ByteArrayOutputStream out = new ByteArrayOutputStream();
+                    byte[] buf = new byte[4096];
+                    int n;
+                    while ((n = in.read(buf)) > 0 && out.size() < 256 * 1024) {
+                        out.write(buf, 0, n);
+                    }
+                    in.close();
+                    final String body = out.toString("UTF-8");
+                    new JSONObject(body); // only keep valid JSON
+                    getSharedPreferences("tatbiqi", MODE_PRIVATE).edit().putString("remoteConfig", body).apply();
+                    mainHandler.post(new Runnable() {
+                        @Override
+                        public void run() {
+                            applyRemoteConfig(body);
+                            if (webView != null) {
+                                String url = webView.getUrl();
+                                refreshWhatsAppButton(webView, url);
+                                maybeShowOffer(webView, url);
+                            }
+                        }
+                    });
+                } catch (Exception ignored) {
+                } finally {
+                    if (c != null) {
+                        c.disconnect();
+                    }
+                }
+            }
+        }).start();
+    }
+
+    /**
+     * {"whatsapp": {"number", "message"} | null, "offer": {...} | null}.
+     * A missing key leaves the value as it was; null turns the add-on off.
+     */
+    private void applyRemoteConfig(String json) {
+        if (json == null) {
+            return;
+        }
+        try {
+            JSONObject cfg = new JSONObject(json);
+            if (cfg.has("whatsapp")) {
+                JSONObject wa = cfg.optJSONObject("whatsapp");
+                String number = wa == null ? "" : wa.optString("number", "").replaceAll("\\D", "");
+                whatsappNumber = number.length() >= 8 && number.length() <= 15 ? number : "";
+                whatsappMessage = wa == null ? "" : wa.optString("message", "");
+            }
+            if (cfg.has("offer")) {
+                offer = cfg.optJSONObject("offer");
+            }
+        } catch (Exception ignored) {
+        }
+    }
+
+    private boolean onStorePage(String url) {
+        try {
+            String host = Uri.parse(url).getHost();
+            return host != null && isStoreHost(host);
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    /** Shows the offers popup once per launch, on a store page. Text is set with textContent, never as HTML. */
+    private void maybeShowOffer(WebView view, String url) {
+        if (offerShown || offer == null || url == null || !onStorePage(url)) {
+            return;
+        }
+        offerShown = true;
+        JSONObject o = new JSONObject();
+        try {
+            o.put("title", offer.optString("title", ""));
+            o.put("text", offer.optString("text", ""));
+            o.put("image", offer.optString("imageUrl", ""));
+            o.put("link", offer.optString("linkUrl", ""));
+            o.put("button", offer.optString("buttonText", ""));
+            o.put("color", primaryColor);
+        } catch (Exception e) {
+            return;
+        }
+        String js = "(function(o){"
+                + "if(document.getElementById('tatbiqi-offer'))return;"
+                + "var ov=document.createElement('div');ov.id='tatbiqi-offer';ov.dir='auto';"
+                + "ov.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:2147483647;"
+                + "display:flex;align-items:center;justify-content:center;padding:24px;';"
+                + "var c=document.createElement('div');"
+                + "c.style.cssText='position:relative;background:#fff;color:#111;border-radius:18px;overflow:hidden;"
+                + "width:100%;max-width:360px;box-shadow:0 10px 40px rgba(0,0,0,.35);font-family:inherit;text-align:center;';"
+                + "var x=document.createElement('div');x.textContent='\u00D7';x.setAttribute('role','button');"
+                + "x.setAttribute('aria-label','close');"
+                + "x.style.cssText='position:absolute;top:8px;left:8px;width:32px;height:32px;border-radius:50%;"
+                + "background:rgba(0,0,0,.45);color:#fff;font-size:22px;line-height:32px;cursor:pointer;z-index:1;';"
+                + "function close(){ov.remove();}"
+                + "x.onclick=close;ov.onclick=function(e){if(e.target===ov)close();};c.appendChild(x);"
+                + "if(/^https:\\/\\//.test(o.image)){var i=document.createElement('img');i.src=o.image;i.alt='';"
+                + "i.style.cssText='display:block;width:100%;max-height:50vh;object-fit:cover;';c.appendChild(i);}"
+                + "var b=document.createElement('div');b.style.cssText='padding:18px 18px 20px;';"
+                + "if(o.title){var t=document.createElement('div');t.textContent=o.title;"
+                + "t.style.cssText='font-size:19px;font-weight:700;margin-bottom:6px;';b.appendChild(t);}"
+                + "if(o.text){var p=document.createElement('div');p.textContent=o.text;"
+                + "p.style.cssText='font-size:15px;line-height:1.6;color:#444;white-space:pre-wrap;';b.appendChild(p);}"
+                + "if(/^https:\\/\\//.test(o.link)){var a=document.createElement('div');a.setAttribute('role','button');"
+                + "a.textContent=o.button||'\u062A\u0633\u0648\u0651\u0642 \u0627\u0644\u062D\u064A\u0646';"
+                + "a.style.cssText='margin-top:14px;padding:12px;border-radius:12px;color:#fff;font-weight:700;"
+                + "font-size:16px;cursor:pointer;background:'+o.color+';';"
+                + "a.onclick=function(){close();location.href=o.link;};b.appendChild(a);}"
+                + "c.appendChild(b);ov.appendChild(c);(document.body||document.documentElement).appendChild(ov);"
+                + "})(" + o.toString() + ");";
+        view.evaluateJavascript(js, null);
+    }
+
+    /** After the dashboard changes the WhatsApp button: drop the old one and add the new one. */
+    private void refreshWhatsAppButton(WebView view, String url) {
+        view.evaluateJavascript(
+                "(function(){var b=document.getElementById('tatbiqi-wa');if(b)b.remove();})();", null);
+        if (url != null) {
+            injectWhatsAppButton(view, url);
         }
     }
 
@@ -306,6 +466,9 @@ public class MainActivity extends Activity {
     private class WhatsAppBridge {
         @JavascriptInterface
         public void openWhatsApp() {
+            if (whatsappNumber.length() == 0) {
+                return;
+            }
             String link = "https://wa.me/" + whatsappNumber;
             if (whatsappMessage.length() > 0) {
                 link += "?text=" + Uri.encode(whatsappMessage);
@@ -317,6 +480,7 @@ public class MainActivity extends Activity {
     @Override
     protected void onSaveInstanceState(Bundle outState) {
         super.onSaveInstanceState(outState);
+        outState.putBoolean("offerShown", offerShown);
         if (webView != null) {
             webView.saveState(outState);
         }
