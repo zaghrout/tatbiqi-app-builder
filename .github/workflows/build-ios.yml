@@ -30,6 +30,12 @@ on:
       whatsapp_number:
         description: WhatsApp with country code (optional)
         default: ''
+      build_id:
+        description: Dashboard app id (optional; live add-ons, colors and notifications)
+        default: ''
+      splash_url:
+        description: Splash image URL (https, optional; with an app id the dashboard's is used)
+        default: ''
       order_number:
         description: Order number
         required: true
@@ -54,8 +60,11 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Check inputs
+        env:
+          BUILD_ID: ${{ inputs.build_id }}
         run: |
           [[ "$ORDER_NUMBER" =~ ^[A-Za-z0-9_-]{1,64}$ ]] || { echo "bad order number"; exit 1; }
+          [[ -z "$BUILD_ID" || "$BUILD_ID" =~ ^[A-Za-z0-9_-]{1,64}$ ]] || { echo "bad build id"; exit 1; }
           [[ "$VERSION_CODE" =~ ^[0-9]{1,10}$ ]] || { echo "bad version code"; exit 1; }
 
       - name: Tools
@@ -74,11 +83,18 @@ jobs:
           PRIMARY_COLOR: ${{ inputs.primary_color || '0F766E' }}
           LOGO_URL: ${{ inputs.logo_url }}
           WHATSAPP: ${{ inputs.whatsapp_number || '966500000000' }}
+          BUILD_ID: ${{ inputs.build_id }}
+          SPLASH_URL: ${{ inputs.splash_url }}
+          CONFIG_BASE_URL: ${{ vars.TATBIQI_CONFIG_BASE_URL || 'https://app.tatbiqii.com/api/app-config' }}
         run: |
+          CONFIG_URL=""
+          [ -n "$BUILD_ID" ] && CONFIG_URL="$CONFIG_BASE_URL/$BUILD_ID"
           python3 builder/build_ios.py \
             --store-url "$STORE_URL" --app-name "$APP_NAME" --package-name "$PACKAGE_NAME" \
             --primary-color "$PRIMARY_COLOR" --logo-url "$LOGO_URL" --whatsapp "$WHATSAPP" \
+            --config-url "$CONFIG_URL" --splash-url "$SPLASH_URL" \
             --version-code "$VERSION_CODE" --out out/ios --result-json out/result.json
+          cat out/ios/Resources/tatbiqi.json; echo
           cd out/ios && xcodegen generate
 
       - name: Build for iPhone (unsigned)
@@ -108,10 +124,18 @@ jobs:
           xcrun simctl install "$UDID" out/sim/Release-iphonesimulator/App.app
           BID=$(python3 -c 'import json;print(json.load(open("out/result.json"))["bundleId"])')
           xcrun simctl launch "$UDID" "$BID"
-          sleep 25
+          sleep 4
+          xcrun simctl io "$UDID" screenshot out/screenshot-start.png
+          sleep 26
           xcrun simctl io "$UDID" screenshot out/screenshot.png
           # still running = no crash on launch
           xcrun simctl spawn "$UDID" launchctl list | grep -q "$BID"
+          # Small copies in the log, readable without downloading the artifact.
+          for f in screenshot-start screenshot; do
+            sips -Z 400 -s format jpeg -s formatOptions 40 "out/$f.png" --out "out/$f-small.jpg" > /dev/null
+            echo "----- $f.jpg base64 -----"; base64 -i "out/$f-small.jpg" | tr -d '\n'; echo
+            echo "----- end -----"
+          done
 
       - name: Keep builds (7 days)
         if: always()
@@ -120,7 +144,7 @@ jobs:
           name: ios-${{ env.ORDER_NUMBER }}
           path: |
             out/app-simulator.zip
-            out/screenshot.png
+            out/screenshot*.png
             out/ios/project.yml
           retention-days: 7
 

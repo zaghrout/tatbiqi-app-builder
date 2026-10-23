@@ -18,11 +18,12 @@ Usage:
 import argparse
 import io
 import json
+import re
 import shutil
 import sys
 from pathlib import Path
 
-from build_apk import BuildError, download_logo, validate
+from build_apk import BuildError, download_logo, fetch_design, hex_color, validate, write_splash
 
 HERE = Path(__file__).resolve().parent
 SOURCES = HERE / "ios" / "Sources"
@@ -131,6 +132,10 @@ def write_project_yml(out, cfg, args, team_id):
                             },
                         },
                         "LSApplicationQueriesSchemes": ["whatsapp", "tel", "mailto"],
+                        # Store notifications: checked when the app opens and, when iOS
+                        # allows it, in the background (NotificationChecker.swift).
+                        "UIBackgroundModes": ["fetch"],
+                        "BGTaskSchedulerPermittedIdentifiers": ["$(PRODUCT_BUNDLE_IDENTIFIER).notifications"],
                     },
                 },
             },
@@ -150,11 +155,28 @@ def generate(args):
     assets.mkdir(parents=True)
     (assets / "Contents.json").write_text('{"info":{"author":"xcode","version":1}}', encoding="utf-8")
 
+    # Same design values as the Android build: the dashboard's, unless given on the command line.
+    design = fetch_design(cfg["config_url"], args.version_code)
+    secondary = hex_color(args.secondary_color) or hex_color(design.get("secondaryColor"))
+    accent = hex_color(args.accent_color) or hex_color(design.get("accentColor"))
+    splash_url = (args.splash_url or str(design.get("splashImage") or "")).strip()
+    splash = ""
+    if re.fullmatch(r"https://\S+", splash_url):
+        try:
+            write_splash(resources, splash_url)
+            splash = "splash.jpg"
+        except Exception as e:  # a bad image should not fail the build
+            print(f"⚠️  splash skipped: {e}")
+
     (resources / "tatbiqi.json").write_text(json.dumps({
         "storeUrl": cfg["store_url"],
         "primaryColor": "#" + cfg["color"],
+        "secondaryColor": "#" + secondary if secondary else "",
+        "accentColor": "#" + accent if accent else "",
+        "splash": splash,
         "whatsappNumber": cfg["whatsapp"],
         "whatsappMessage": cfg["whatsapp_message"],
+        "configUrl": cfg["config_url"],
     }, ensure_ascii=False), encoding="utf-8")
 
     logo = None
@@ -182,6 +204,7 @@ def generate(args):
         "versionCode": args.version_code,
         "versionName": args.version_name,
         "icon": icon_source,
+        "splash": bool(splash),
     }
     print(f"🎉 {json.dumps(result, ensure_ascii=False)}")
     if args.result_json:
@@ -197,6 +220,10 @@ def main():
     p.add_argument("--whatsapp", default="")
     p.add_argument("--whatsapp-message", default="")
     p.add_argument("--logo-url", default="")
+    p.add_argument("--config-url", default="", help="the app's /api/app-config/<id> (live add-ons)")
+    p.add_argument("--splash-url", default="", help="splash image; default: the dashboard's")
+    p.add_argument("--secondary-color", default="", help="bottom bar color; default: the dashboard's")
+    p.add_argument("--accent-color", default="", help="offer button color; default: the dashboard's")
     p.add_argument("--version-code", type=int, default=1)
     p.add_argument("--version-name", default="1.0.0")
     p.add_argument("--team-id", default="", help="Apple Developer Team ID (for signed builds)")
