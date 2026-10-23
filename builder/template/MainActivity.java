@@ -4,6 +4,7 @@ import android.app.Activity;
 import android.content.ActivityNotFoundException;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.content.pm.PackageManager;
 import android.graphics.Color;
 import android.graphics.Insets;
 import android.net.Uri;
@@ -44,6 +45,9 @@ import java.net.URL;
  * are read at every launch from configUrl, so they apply without a new build.
  * The last answer is kept, so they also work offline; until the first answer
  * arrives the values from tatbiqi.json are used.
+ *
+ * Store notifications come from NotificationJob, which checks the dashboard in
+ * the background. Tapping one opens this activity with its link.
  *
  * Rules learned on Realme/Xiaomi (see LESSONS-LEARNED.md):
  *  - The WebView is the only view. No native buttons or overlays on top of it.
@@ -141,9 +145,45 @@ public class MainActivity extends Activity {
         if (savedInstanceState != null) {
             webView.restoreState(savedInstanceState);
         } else {
-            webView.loadUrl(storeUrl);
+            String link = notificationLink(getIntent());
+            webView.loadUrl(link != null ? link : storeUrl);
         }
         fetchRemoteConfig();
+        NotificationJob.schedule(this, configUrl);
+        askNotificationPermission();
+    }
+
+    /** A tapped notification while the app is open: go to its page. */
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        String link = notificationLink(intent);
+        if (link != null && webView != null) {
+            webView.loadUrl(link);
+        }
+    }
+
+    private static String notificationLink(Intent intent) {
+        String link = intent == null ? null : intent.getStringExtra(NotificationJob.EXTRA_URL);
+        return link != null && link.startsWith("https://") ? link : null;
+    }
+
+    /** Android 13+ needs the customer's OK to show notifications. Asked once, on the first launch. */
+    private void askNotificationPermission() {
+        if (Build.VERSION.SDK_INT < 33 || !configUrl.startsWith("https://")) {
+            return;
+        }
+        SharedPreferences prefs = getSharedPreferences("tatbiqi", MODE_PRIVATE);
+        if (prefs.getBoolean("notifAsked", false)
+                || checkSelfPermission("android.permission.POST_NOTIFICATIONS") == PackageManager.PERMISSION_GRANTED) {
+            return;
+        }
+        prefs.edit().putBoolean("notifAsked", true).apply();
+        try {
+            requestPermissions(new String[]{"android.permission.POST_NOTIFICATIONS"}, 1);
+        } catch (Exception ignored) {
+        }
     }
 
     /** Store color behind the status bar, with icons that stay readable on it. */

@@ -43,7 +43,7 @@ from pathlib import Path
 from xml.sax.saxutils import escape as xml_escape
 
 HERE = Path(__file__).resolve().parent
-TEMPLATE_JAVA = HERE / "template" / "MainActivity.java"
+TEMPLATE_DIR = HERE / "template"  # MainActivity.java, NotificationJob.java
 JAVA_PACKAGE = "com.tatbiqi.app"  # code package; the app id is --package-name
 MIN_SDK = "23"
 TARGET_SDK = "36"  # Android 16, required by Google Play for new apps and updates
@@ -153,6 +153,8 @@ def write_manifest(work, cfg):
     package="{JAVA_PACKAGE}">
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <application
         android:label="{label}"
         android:icon="@mipmap/ic_launcher"
@@ -171,6 +173,10 @@ def write_manifest(work, cfg):
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        <service
+            android:name="{JAVA_PACKAGE}.NotificationJob"
+            android:permission="android.permission.BIND_JOB_SERVICE"
+            android:exported="false" />
     </application>
 </manifest>
 '''
@@ -187,6 +193,20 @@ def write_default_icon(res, color):
     <path android:fillColor="#{color}" android:pathData="M8,0h32a8,8 0,0 1,8 8v32a8,8 0,0 1,-8 8h-32a8,8 0,0 1,-8 -8v-32a8,8 0,0 1,8 -8z" />
     <path android:fillColor="#FFFFFF"
         android:pathData="M16,19 L32,19 L33,37 L15,37 Z M20,19 v-2 a4,4 0,0 1,8 0 v2 h-2 v-2 a2,2 0,0 0,-4 0 v2 z" />
+</vector>
+''', encoding="utf-8")
+
+
+def write_notification_icon(res):
+    """White bell for the status bar (Android draws small icons from their alpha)."""
+    d = res / "drawable"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "ic_notification.xml").write_text('''<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp" android:height="24dp"
+    android:viewportWidth="24" android:viewportHeight="24">
+    <path android:fillColor="#FFFFFFFF"
+        android:pathData="M12,22c1.1,0 2,-0.9 2,-2h-4c0,1.1 0.9,2 2,2zM18,16v-5c0,-3.07 -1.64,-5.64 -4.5,-6.32V4c0,-0.83 -0.67,-1.5 -1.5,-1.5s-1.5,0.67 -1.5,1.5v0.68C7.63,5.36 6,7.92 6,11v5l-2,2v1h16v-1l-2,-2z" />
 </vector>
 ''', encoding="utf-8")
 
@@ -339,6 +359,7 @@ def build(args):
 
         write_manifest(work, cfg)
         write_assets(work, cfg)
+        write_notification_icon(res)
 
         icon_source = "default"
         if cfg["logo_url"]:
@@ -353,7 +374,7 @@ def build(args):
         print("\n🔨 javac", flush=True)
         run(["javac", "--release", "8", "-nowarn", "-encoding", "UTF-8",
              "-classpath", platform,
-             "-d", work / "classes", TEMPLATE_JAVA])
+             "-d", work / "classes"] + sorted(TEMPLATE_DIR.glob("*.java")))
         classes = [str(p) for p in (work / "classes").rglob("*.class")]
 
         print("\n📦 d8", flush=True)
