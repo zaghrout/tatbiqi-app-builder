@@ -67,6 +67,7 @@ jobs:
       VERSION_CODE: ${{ github.event.client_payload.version_code || inputs.version_code || '1' }}
       VERSION_NAME: ${{ github.event.client_payload.version_name || '1.0.0' }}
       CALLBACK_URL: ${{ vars.TATBIQI_CALLBACK_URL || 'https://app.tatbiqii.com/api/build/callback' }}
+      CONFIG_BASE_URL: ${{ vars.TATBIQI_CONFIG_BASE_URL || 'https://app.tatbiqii.com/api/app-config' }}
       BUILD_CALLBACK_SECRET: ${{ secrets.BUILD_CALLBACK_SECRET }}
       RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
 
@@ -123,8 +124,11 @@ jobs:
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
+          CONFIG_URL=""
+          [ -n "$BUILD_ID" ] && CONFIG_URL="$CONFIG_BASE_URL/$BUILD_ID"
           python3 builder/build_apk.py \
             --store-url "$STORE_URL" \
+            --config-url "$CONFIG_URL" \
             --app-name "$APP_NAME" \
             --package-name "$PACKAGE_NAME" \
             --primary-color "$PRIMARY_COLOR" \

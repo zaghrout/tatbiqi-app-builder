@@ -89,6 +89,10 @@ def validate(args):
 
     msg = (args.whatsapp_message or "").strip()[:300]
 
+    config_url = (args.config_url or "").strip()
+    if config_url and not re.fullmatch(r"https://[A-Za-z0-9.-]+(:\d+)?/[A-Za-z0-9/_.-]*", config_url):
+        raise BuildError("config-url must be an https:// URL")
+
     logo = (args.logo_url or "").strip()
     if logo and not re.fullmatch(r"https?://\S+", logo):
         raise BuildError("logo-url must be an http(s) URL")
@@ -106,6 +110,7 @@ def validate(args):
         "whatsapp": wa,
         "whatsapp_message": msg,
         "logo_url": logo,
+        "config_url": config_url,
     }
 
 
@@ -234,6 +239,7 @@ def write_assets(work, cfg):
         "primaryColor": "#" + cfg["color"],
         "whatsappNumber": cfg["whatsapp"],
         "whatsappMessage": cfg["whatsapp_message"],
+        "configUrl": cfg["config_url"],
     }
     (assets / "tatbiqi.json").write_text(json.dumps(config, ensure_ascii=False), encoding="utf-8")
     return assets
@@ -406,6 +412,8 @@ def main():
     p.add_argument("--whatsapp", default="")
     p.add_argument("--whatsapp-message", default="")
     p.add_argument("--logo-url", default="")
+    p.add_argument("--config-url", default="",
+                   help="dashboard URL the app reads live add-ons from (WhatsApp, offers popup)")
     p.add_argument("--version-code", type=int, default=1)
     p.add_argument("--version-name", default="1.0.0")
     p.add_argument("--output", required=True)
