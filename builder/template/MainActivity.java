@@ -5,8 +5,17 @@ import android.content.ActivityNotFoundException;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
+import android.graphics.Canvas;
 import android.graphics.Color;
+import android.graphics.ColorFilter;
 import android.graphics.Insets;
+import android.graphics.Paint;
+import android.graphics.PixelFormat;
+import android.graphics.Rect;
+import android.graphics.RectF;
+import android.graphics.drawable.Drawable;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
@@ -49,6 +58,10 @@ import java.net.URL;
  * Store notifications come from NotificationJob, which checks the dashboard in
  * the background. Tapping one opens this activity with its link.
  *
+ * Design: the splash image (assets/splash.jpg) is drawn behind the WebView,
+ * which stays hidden until the first page loads. The secondary color paints
+ * the bottom navigation bar, the accent color the offer popup's button.
+ *
  * Rules learned on Realme/Xiaomi (see LESSONS-LEARNED.md):
  *  - The WebView is the only view. No native buttons or overlays on top of it.
  *  - The WhatsApp button is injected into the page with JavaScript.
@@ -64,6 +77,13 @@ public class MainActivity extends Activity {
     private String storeUrl = "https://salla.sa";
     private String storeHost = "";
     private String primaryColor = "#0F766E";
+    /** Bottom navigation bar; "" keeps the primary color. */
+    private String secondaryColor = "";
+    /** Offer popup button; "" uses the primary color. */
+    private String accentColor = "";
+    private String splashAsset = "";
+    private ShellBackground background;
+    private boolean splashShowing = false;
     private String whatsappNumber = "";
     private String whatsappMessage = "";
     private String configUrl = "";
@@ -90,13 +110,19 @@ public class MainActivity extends Activity {
         } catch (Exception ignored) {
         }
 
+        int navColor = parseColor(secondaryColor, barColor);
+
         FrameLayout root = new FrameLayout(this);
-        root.setBackgroundColor(barColor);
+        background = new ShellBackground(barColor, navColor);
+        root.setBackground(background);
         webView = new WebView(this);
         root.addView(webView, new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
         setContentView(root);
-        setUpSystemBars(root, barColor);
+        setUpSystemBars(root, barColor, navColor);
+        if (savedInstanceState == null) {
+            showSplash();
+        }
 
         WebSettings s = webView.getSettings();
         s.setJavaScriptEnabled(true);
@@ -131,6 +157,7 @@ public class MainActivity extends Activity {
             @Override
             public void onPageFinished(WebView view, String url) {
                 super.onPageFinished(view, url);
+                hideSplash();
                 injectWhatsAppButton(view, url);
                 maybeShowOffer(view, url);
             }
@@ -186,9 +213,15 @@ public class MainActivity extends Activity {
         }
     }
 
-    /** Store color behind the status bar, with icons that stay readable on it. */
-    private void setUpSystemBars(View root, int barColor) {
+    /**
+     * Store color behind the status bar and the secondary color behind the
+     * navigation bar, with icons that stay readable on them.
+     */
+    @SuppressWarnings("deprecation")
+    private void setUpSystemBars(View root, int barColor, int navColor) {
         boolean lightBar = luminance(barColor) > 0.6;
+        boolean lightNav = luminance(navColor) > 0.6;
+        boolean customNav = secondaryColor.length() > 0;
         Window window = getWindow();
         try {
             if (Build.VERSION.SDK_INT >= 35) {
@@ -200,21 +233,144 @@ public class MainActivity extends Activity {
                                 WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout());
                         Insets ime = insets.getInsets(WindowInsets.Type.ime());
                         v.setPadding(bars.left, bars.top, bars.right, Math.max(bars.bottom, ime.bottom));
+                        background.setBottomHeight(bars.bottom);
                         return WindowInsets.CONSUMED;
                     }
                 });
             } else {
                 window.addFlags(WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS);
                 window.setStatusBarColor(barColor);
+                if (customNav) {
+                    window.setNavigationBarColor(navColor);
+                    if (Build.VERSION.SDK_INT >= 26 && Build.VERSION.SDK_INT < 30 && lightNav) {
+                        View decor = window.getDecorView();
+                        decor.setSystemUiVisibility(decor.getSystemUiVisibility()
+                                | View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR);
+                    }
+                }
             }
             if (Build.VERSION.SDK_INT >= 30) {
                 int mask = WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS;
-                if (Build.VERSION.SDK_INT >= 35) {
+                int value = lightBar ? mask : 0;
+                if (Build.VERSION.SDK_INT >= 35 || customNav) {
                     mask |= WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS;
+                    if (lightNav) {
+                        value |= WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS;
+                    }
                 }
-                window.getInsetsController().setSystemBarsAppearance(lightBar ? mask : 0, mask);
+                window.getInsetsController().setSystemBarsAppearance(value, mask);
             }
         } catch (Exception ignored) {
+        }
+    }
+
+    private static int parseColor(String hex, int fallback) {
+        if (hex == null || !hex.matches("#[0-9A-Fa-f]{6}")) {
+            return fallback;
+        }
+        try {
+            return Color.parseColor(hex);
+        } catch (Exception e) {
+            return fallback;
+        }
+    }
+
+    /** Splash image behind the hidden WebView until the first page loads (6 seconds at most). */
+    private void showSplash() {
+        if (splashAsset.length() == 0) {
+            return;
+        }
+        try {
+            InputStream in = getAssets().open(splashAsset);
+            BitmapFactory.Options o = new BitmapFactory.Options();
+            o.inPreferredConfig = Bitmap.Config.RGB_565;
+            Bitmap bmp = BitmapFactory.decodeStream(in, null, o);
+            in.close();
+            if (bmp == null) {
+                return;
+            }
+            background.setSplash(bmp);
+            webView.setVisibility(View.INVISIBLE);
+            splashShowing = true;
+            mainHandler.postDelayed(new Runnable() {
+                @Override
+                public void run() {
+                    hideSplash();
+                }
+            }, 6000);
+        } catch (Exception ignored) {
+        }
+    }
+
+    private void hideSplash() {
+        if (!splashShowing) {
+            return;
+        }
+        splashShowing = false;
+        if (webView != null) {
+            webView.setVisibility(View.VISIBLE);
+        }
+        background.setSplash(null);
+    }
+
+    /**
+     * The window background: the store color, the navigation bar color along the
+     * bottom inset (Android 15+, where the app draws behind the bars), and the
+     * splash image while it shows, scaled to fill the screen.
+     */
+    private static class ShellBackground extends Drawable {
+        private final Paint paint = new Paint(Paint.FILTER_BITMAP_FLAG);
+        private final int topColor;
+        private final int bottomColor;
+        private int bottomHeight = 0;
+        private Bitmap splash;
+
+        ShellBackground(int topColor, int bottomColor) {
+            this.topColor = topColor;
+            this.bottomColor = bottomColor;
+        }
+
+        void setBottomHeight(int h) {
+            bottomHeight = h;
+            invalidateSelf();
+        }
+
+        void setSplash(Bitmap bmp) {
+            splash = bmp;
+            invalidateSelf();
+        }
+
+        @Override
+        public void draw(Canvas canvas) {
+            Rect b = getBounds();
+            canvas.drawColor(topColor);
+            if (splash != null) {
+                float scale = Math.max(b.width() / (float) splash.getWidth(), b.height() / (float) splash.getHeight());
+                float w = splash.getWidth() * scale;
+                float h = splash.getHeight() * scale;
+                float left = b.left + (b.width() - w) / 2f;
+                float top = b.top + (b.height() - h) / 2f;
+                canvas.drawBitmap(splash, null, new RectF(left, top, left + w, top + h), paint);
+                return;
+            }
+            if (bottomHeight > 0) {
+                paint.setColor(bottomColor);
+                canvas.drawRect(b.left, b.bottom - bottomHeight, b.right, b.bottom, paint);
+            }
+        }
+
+        @Override
+        public void setAlpha(int alpha) {
+        }
+
+        @Override
+        public void setColorFilter(ColorFilter cf) {
+        }
+
+        @Override
+        @SuppressWarnings("deprecation")
+        public int getOpacity() {
+            return PixelFormat.OPAQUE;
         }
     }
 
@@ -270,6 +426,9 @@ public class MainActivity extends Activity {
             JSONObject cfg = new JSONObject(out.toString("UTF-8"));
             storeUrl = cfg.optString("storeUrl", storeUrl);
             primaryColor = cfg.optString("primaryColor", primaryColor);
+            secondaryColor = cfg.optString("secondaryColor", "");
+            accentColor = cfg.optString("accentColor", "");
+            splashAsset = "splash.jpg".equals(cfg.optString("splash", "")) ? "splash.jpg" : "";
             whatsappNumber = cfg.optString("whatsappNumber", "");
             whatsappMessage = cfg.optString("whatsappMessage", "");
             configUrl = cfg.optString("configUrl", "");
@@ -350,6 +509,14 @@ public class MainActivity extends Activity {
             if (cfg.has("offer")) {
                 offer = cfg.optJSONObject("offer");
             }
+            // Colors changed on the dashboard after the build; null keeps the primary color.
+            JSONObject design = cfg.optJSONObject("design");
+            if (design != null) {
+                String sec = design.isNull("secondaryColor") ? "" : design.optString("secondaryColor", "");
+                String acc = design.isNull("accentColor") ? "" : design.optString("accentColor", "");
+                secondaryColor = sec.matches("#[0-9A-Fa-f]{6}") ? sec : "";
+                accentColor = acc.matches("#[0-9A-Fa-f]{6}") ? acc : "";
+            }
         } catch (Exception ignored) {
         }
     }
@@ -376,7 +543,7 @@ public class MainActivity extends Activity {
             o.put("image", offer.optString("imageUrl", ""));
             o.put("link", offer.optString("linkUrl", ""));
             o.put("button", offer.optString("buttonText", ""));
-            o.put("color", primaryColor);
+            o.put("color", accentColor.matches("#[0-9A-Fa-f]{6}") ? accentColor : primaryColor);
         } catch (Exception e) {
             return;
         }

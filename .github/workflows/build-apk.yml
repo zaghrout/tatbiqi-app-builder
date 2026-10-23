@@ -39,6 +39,12 @@ on:
       whatsapp_number:
         description: WhatsApp with country code (optional)
         default: ''
+      splash_url:
+        description: Splash image URL (https, optional; dashboard builds read it from the dashboard)
+        default: ''
+      secondary_color:
+        description: Bottom bar color hex without # (optional)
+        default: ''
       order_number:
         description: Order number
         required: true
@@ -62,6 +68,8 @@ jobs:
       LOGO_URL: ${{ github.event.client_payload.logo_url || inputs.logo_url }}
       WHATSAPP: ${{ github.event.client_payload.whatsapp_number || inputs.whatsapp_number }}
       WHATSAPP_MESSAGE: ${{ github.event.client_payload.whatsapp_message }}
+      SPLASH_URL: ${{ inputs.splash_url }}
+      SECONDARY_COLOR: ${{ inputs.secondary_color }}
       ORDER_NUMBER: ${{ github.event.client_payload.order_number || inputs.order_number }}
       BUILD_ID: ${{ github.event.client_payload.build_id }}
       VERSION_CODE: ${{ github.event.client_payload.version_code || inputs.version_code || '1' }}
@@ -135,6 +143,8 @@ jobs:
             --logo-url "$LOGO_URL" \
             --whatsapp "$WHATSAPP" \
             --whatsapp-message "$WHATSAPP_MESSAGE" \
+            --splash-url "$SPLASH_URL" \
+            --secondary-color "$SECONDARY_COLOR" \
             --version-code "$VERSION_CODE" \
             --version-name "$VERSION_NAME" \
             --output "out/app.apk" \

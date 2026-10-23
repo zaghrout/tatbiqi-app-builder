@@ -49,6 +49,7 @@ MIN_SDK = "23"
 TARGET_SDK = "36"  # Android 16, required by Google Play for new apps and updates
 
 MAX_LOGO_BYTES = 5 * 1024 * 1024
+SPLASH_MAX_SIZE = (1080, 1920)
 ICON_SIZES = [
     ("mipmap-mdpi", 48),
     ("mipmap-hdpi", 72),
@@ -211,13 +212,54 @@ def write_notification_icon(res):
 ''', encoding="utf-8")
 
 
-def download_logo(url):
+def download_logo(url, what="logo"):
     req = urllib.request.Request(url, headers={"User-Agent": "TatbiqiBuilder/3"})
     with urllib.request.urlopen(req, timeout=20) as resp:
         data = resp.read(MAX_LOGO_BYTES + 1)
     if len(data) > MAX_LOGO_BYTES:
-        raise BuildError("logo is larger than 5MB")
+        raise BuildError(f"{what} is larger than 5MB")
     return data
+
+
+def fetch_design(config_url, version_code):
+    """Splash image and colors saved on the dashboard; {} if it can't be read.
+
+    The query string skips the CDN's cached copy, so a design saved just
+    before the build is the one used.
+    """
+    if not config_url:
+        return {}
+    try:
+        req = urllib.request.Request(f"{config_url}?build={version_code}",
+                                     headers={"User-Agent": "TatbiqiBuilder/3", "Accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            design = json.loads(resp.read(256 * 1024)).get("design")
+        return design if isinstance(design, dict) else {}
+    except Exception as e:  # a missing design should not fail the build
+        print(f"⚠️  design not read: {e}")
+        return {}
+
+
+def hex_color(value):
+    """'#d4a574' -> 'D4A574'; '' for anything that isn't a 6-digit hex color."""
+    v = str(value or "").strip().lstrip("#")
+    return v.upper() if re.fullmatch(r"[0-9A-Fa-f]{6}", v) else ""
+
+
+def write_splash(assets, url):
+    """Shown while the store loads. Scaled down to phone size and saved as JPEG."""
+    from PIL import Image
+
+    img = Image.open(io.BytesIO(download_logo(url, "splash image")))
+    img.load()
+    if img.mode in ("RGBA", "LA", "P"):
+        img = img.convert("RGBA")
+        bg = Image.new("RGBA", img.size, (255, 255, 255, 255))
+        bg.alpha_composite(img)
+        img = bg
+    img = img.convert("RGB")
+    img.thumbnail(SPLASH_MAX_SIZE, Image.LANCZOS)
+    img.save(assets / "splash.jpg", "JPEG", quality=85, optimize=True)
 
 
 def write_logo_icons(res, logo_bytes, color):
@@ -254,15 +296,25 @@ def write_logo_icons(res, logo_bytes, color):
 def write_assets(work, cfg):
     assets = work / "assets"
     assets.mkdir()
+    splash = ""
+    if cfg["splash_url"]:
+        try:
+            write_splash(assets, cfg["splash_url"])
+            splash = "splash.jpg"
+        except Exception as e:  # a bad image should not fail the build
+            print(f"⚠️  splash skipped: {e}")
     config = {
         "storeUrl": cfg["store_url"],
         "primaryColor": "#" + cfg["color"],
+        "secondaryColor": "#" + cfg["secondary"] if cfg["secondary"] else "",
+        "accentColor": "#" + cfg["accent"] if cfg["accent"] else "",
+        "splash": splash,
         "whatsappNumber": cfg["whatsapp"],
         "whatsappMessage": cfg["whatsapp_message"],
         "configUrl": cfg["config_url"],
     }
     (assets / "tatbiqi.json").write_text(json.dumps(config, ensure_ascii=False), encoding="utf-8")
-    return assets
+    return splash
 
 
 # ---------------------------------------------------------------- signing
@@ -357,8 +409,14 @@ def build(args):
         (work / "classes").mkdir()
         (work / "dex").mkdir()
 
+        design = fetch_design(cfg["config_url"], args.version_code)
+        cfg["secondary"] = hex_color(args.secondary_color) or hex_color(design.get("secondaryColor"))
+        cfg["accent"] = hex_color(args.accent_color) or hex_color(design.get("accentColor"))
+        splash_url = (args.splash_url or str(design.get("splashImage") or "")).strip()
+        cfg["splash_url"] = splash_url if re.fullmatch(r"https://\S+", splash_url) else ""
+
         write_manifest(work, cfg)
-        write_assets(work, cfg)
+        splash = write_assets(work, cfg)
         write_notification_icon(res)
 
         icon_source = "default"
@@ -413,6 +471,7 @@ def build(args):
             "versionCode": args.version_code,
             "versionName": args.version_name,
             "icon": icon_source,
+            "splash": bool(splash),
         }
         if aab:
             result.update({"aab": str(aab), "aabSize": aab.stat().st_size})
@@ -435,6 +494,9 @@ def main():
     p.add_argument("--logo-url", default="")
     p.add_argument("--config-url", default="",
                    help="dashboard URL the app reads live add-ons from (WhatsApp, offers popup)")
+    p.add_argument("--splash-url", default="", help="splash image (https); default: the dashboard's")
+    p.add_argument("--secondary-color", default="", help="bottom bar color; default: the dashboard's")
+    p.add_argument("--accent-color", default="", help="offer pop-up button color; default: the dashboard's")
     p.add_argument("--version-code", type=int, default=1)
     p.add_argument("--version-name", default="1.0.0")
     p.add_argument("--output", required=True)
