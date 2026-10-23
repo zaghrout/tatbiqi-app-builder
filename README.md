@@ -78,7 +78,10 @@ The app is a full-screen `WKWebView` with the same rules as the Android shell (s
 payment pages stay in the app, WhatsApp and other links open outside, WhatsApp button
 injected on store pages), plus pull to refresh, swipe back and an offline screen.
 
-Today the workflow builds unsigned for iPhone and for the simulator, then launches the app
-in a simulator as a smoke test. Signing and App Store upload come with the first client's
+The dashboard starts it with a `repository_dispatch` of type `build-ios` (`POST /api/build/ios`
+in `zaghrout/tatbiqi`), using the settings of the order's last Android build. Today the
+workflow builds unsigned for iPhone and for the simulator, launches the app in a simulator,
+uploads the screenshot to R2 at `ios/<order>/<build>/screenshot.png` and reports to the
+callback with `"platform": "ios"`; the dashboard shows the screenshot on the order page. Signing and App Store upload come with the first client's
 Apple Developer account (Team ID + App Store Connect API key). The bundle id is the Android
 package name with `_` replaced by `-`.

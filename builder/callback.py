@@ -8,6 +8,7 @@ The body is signed with HMAC-SHA256 using BUILD_CALLBACK_SECRET, sent as
 Usage:
   python3 builder/callback.py --status building|ready|failed \
       [--result-json result.json] [--apk-key apks/ORD/1.apk] [--aab-key aabs/ORD/1.aab] [--error "..."]
+  python3 builder/callback.py --platform ios --status ready --screenshot-key ios/ORD/1/screenshot.png
 
 Environment:
   CALLBACK_URL, BUILD_CALLBACK_SECRET, BUILD_ID, ORDER_NUMBER, RUN_URL
@@ -30,6 +31,9 @@ def main():
     p.add_argument("--apk-key", default="")
     p.add_argument("--aab-key", default="")
     p.add_argument("--error", default="")
+    p.add_argument("--platform", default="android", choices=["android", "ios"])
+    p.add_argument("--screenshot-key", default="")
+    p.add_argument("--version-code", type=int, default=None)
     args = p.parse_args()
 
     url = os.environ.get("CALLBACK_URL", "")
@@ -64,6 +68,12 @@ def main():
         body["aabKey"] = args.aab_key
     if args.error:
         body["error"] = args.error[:500]
+    if args.platform == "ios":
+        body["platform"] = "ios"
+        if args.screenshot_key:
+            body["screenshotKey"] = args.screenshot_key
+    if args.version_code is not None:
+        body["versionCode"] = args.version_code
 
     raw = json.dumps(body, separators=(",", ":")).encode("utf-8")
     sig = hmac.new(secret.encode("utf-8"), raw, hashlib.sha256).hexdigest()

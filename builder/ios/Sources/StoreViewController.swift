@@ -231,8 +231,11 @@ final class StoreViewController: UIViewController, WKNavigationDelegate, WKUIDel
         hideSplash()
         if !firstPageLoaded {
             firstPageLoaded = true
-            // Asked once, after the store is on screen, like Android 13+.
-            NotificationChecker.requestPermission()
+            // Asked once, after the store is on screen, like Android 13+. The build's
+            // simulator test skips it so the screenshot shows the store.
+            if !ProcessInfo.processInfo.arguments.contains("-tatbiqiNoPrompt") {
+                NotificationChecker.requestPermission()
+            }
         }
         maybeShowOffer()
     }
